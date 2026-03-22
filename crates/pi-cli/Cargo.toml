@@ -1,0 +1,20 @@
+[package]
+edition = "2021"
+version = "0.1.0"
+name = "pi-cli"
+repository = "https://github.com/TopWayAI/rust-pi"
+
+[[bin]]
+name = "pi"
+path = "src/main.rs"
+
+[dependencies]
+pi-core = { path = "../pi-core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
