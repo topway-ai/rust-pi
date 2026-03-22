@@ -25,14 +25,6 @@ impl Default for WriteTool {
 }
 
 impl crate::tools::Tool for WriteTool {
-    fn name(&self) -> &str {
-        "write"
-    }
-
-    fn description(&self) -> &str {
-        "write file contents"
-    }
-
     fn spec(&self) -> ToolSpec {
         ToolSpec::write()
     }

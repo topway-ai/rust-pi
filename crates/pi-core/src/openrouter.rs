@@ -1,5 +1,5 @@
 use crate::tool_spec::ToolSpec;
-use crate::{tools::all_specs, Content, Error, Message, Provider, ProviderResponse, Result, Role};
+use crate::{Content, Error, Message, Provider, ProviderResponse, Result, Role};
 use serde::{Deserialize, Serialize};
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -21,7 +21,7 @@ impl OpenRouterProvider {
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
                 .expect("failed to create HTTP client"),
-            tools: all_specs(),
+            tools: crate::tool_spec::all_tool_specs(),
         }
     }
 
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_tool_order_deterministic() {
-        let specs = all_specs();
+        let specs = crate::tool_spec::all_tool_specs();
         let provider = OpenRouterProvider::with_tools("key", "model", specs);
         let messages = vec![Message::user("test")];
         let request1 = provider.build_request(&messages);

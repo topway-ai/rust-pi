@@ -26,14 +26,6 @@ impl Default for EditTool {
 }
 
 impl crate::tools::Tool for EditTool {
-    fn name(&self) -> &str {
-        "edit"
-    }
-
-    fn description(&self) -> &str {
-        "replace first occurrence of find string with replace"
-    }
-
     fn spec(&self) -> ToolSpec {
         ToolSpec::edit()
     }

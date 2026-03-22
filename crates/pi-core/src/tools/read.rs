@@ -24,14 +24,6 @@ impl Default for ReadTool {
 }
 
 impl crate::tools::Tool for ReadTool {
-    fn name(&self) -> &str {
-        "read"
-    }
-
-    fn description(&self) -> &str {
-        "read file contents"
-    }
-
     fn spec(&self) -> ToolSpec {
         ToolSpec::read()
     }

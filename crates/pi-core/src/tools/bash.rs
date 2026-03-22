@@ -25,14 +25,6 @@ impl Default for BashTool {
 }
 
 impl crate::tools::Tool for BashTool {
-    fn name(&self) -> &str {
-        "bash"
-    }
-
-    fn description(&self) -> &str {
-        "execute bash command"
-    }
-
     fn spec(&self) -> ToolSpec {
         ToolSpec::bash()
     }

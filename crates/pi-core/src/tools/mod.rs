@@ -13,8 +13,6 @@ use crate::Result;
 use std::collections::HashMap;
 
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
     fn spec(&self) -> ToolSpec;
     fn execute(
         &self,
@@ -37,7 +35,7 @@ impl ToolRegistry {
     }
 
     pub fn add(&mut self, tool: Box<dyn Tool>) {
-        let name = tool.name().to_string();
+        let name = tool.spec().name.to_string();
         if !self.by_name.contains_key(&name) {
             let idx = self.tools.len();
             self.by_name.insert(name, idx);
@@ -62,6 +60,10 @@ impl ToolRegistry {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
+
+    pub fn into_inner(self) -> Vec<Box<dyn Tool>> {
+        self.tools
+    }
 }
 
 impl Default for ToolRegistry {
@@ -77,13 +79,4 @@ pub fn default_tools() -> ToolRegistry {
     registry.add(Box::new(EditTool::new()));
     registry.add(Box::new(BashTool::new()));
     registry
-}
-
-pub fn all_specs() -> Vec<ToolSpec> {
-    vec![
-        ToolSpec::read(),
-        ToolSpec::write(),
-        ToolSpec::edit(),
-        ToolSpec::bash(),
-    ]
 }

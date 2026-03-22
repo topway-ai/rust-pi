@@ -1,9 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use pi_core::{
-    context::ExecutionContext,
-    tools::{BashTool, EditTool, ReadTool, Tool, WriteTool},
-    Agent, Message, OpenRouterProvider, Provider, ProviderResponse,
+    context::ExecutionContext, tools::default_tools, Agent, Message, OpenRouterProvider, Provider,
+    ProviderResponse,
 };
 use std::path::PathBuf;
 use tracing::info;
@@ -29,15 +28,6 @@ struct Cli {
     instruction: String,
 }
 
-fn make_tools() -> Vec<Box<dyn Tool>> {
-    vec![
-        Box::new(ReadTool::new()) as Box<dyn Tool>,
-        Box::new(WriteTool::new()) as Box<dyn Tool>,
-        Box::new(EditTool::new()) as Box<dyn Tool>,
-        Box::new(BashTool::new()) as Box<dyn Tool>,
-    ]
-}
-
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
@@ -57,7 +47,7 @@ fn main() -> Result<()> {
         Box::new(EchoProvider)
     };
 
-    let mut agent = Agent::new(provider, make_tools());
+    let mut agent = Agent::new(provider, default_tools().into_inner());
 
     let result = agent.run(&ctx, &args.instruction)?;
     println!("{}", result);
