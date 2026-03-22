@@ -9,19 +9,17 @@ pub struct ReadArgs {
 }
 
 #[derive(Clone)]
-pub struct ReadTool {
-    _ctx: ExecutionContext,
-}
+pub struct ReadTool;
 
 impl ReadTool {
-    pub fn new(ctx: ExecutionContext) -> Self {
-        Self { _ctx: ctx }
+    pub fn new() -> Self {
+        Self
     }
 }
 
 impl Default for ReadTool {
     fn default() -> Self {
-        Self::new(ExecutionContext::new(std::path::PathBuf::from(".")))
+        Self::new()
     }
 }
 
@@ -65,7 +63,7 @@ mod tests {
     #[test]
     fn test_read_file_inside_workspace() {
         let (ctx, _temp) = test_ctx();
-        let tool = ReadTool::new(ctx.clone());
+        let tool = ReadTool::new();
         fs::write(ctx.resolve_path("test.txt").unwrap(), "hello world").unwrap();
         let result = tool.execute(serde_json::json!({"path": "test.txt"}), &ctx);
         assert!(result.is_ok());
@@ -75,7 +73,7 @@ mod tests {
     #[test]
     fn test_read_path_traversal_rejected() {
         let (ctx, _temp) = test_ctx();
-        let tool = ReadTool::new(ctx.clone());
+        let tool = ReadTool::new();
         let result = tool.execute(serde_json::json!({"path": "../etc/passwd"}), &ctx);
         assert!(result.is_err());
     }
@@ -83,7 +81,7 @@ mod tests {
     #[test]
     fn test_read_nested_traversal_rejected() {
         let (ctx, _temp) = test_ctx();
-        let tool = ReadTool::new(ctx.clone());
+        let tool = ReadTool::new();
         let result = tool.execute(serde_json::json!({"path": "a/../../b"}), &ctx);
         assert!(result.is_err());
     }
@@ -91,7 +89,7 @@ mod tests {
     #[test]
     fn test_read_absolute_path_rejected() {
         let (ctx, _temp) = test_ctx();
-        let tool = ReadTool::new(ctx.clone());
+        let tool = ReadTool::new();
         let result = tool.execute(serde_json::json!({"path": "/etc/passwd"}), &ctx);
         assert!(result.is_err());
     }

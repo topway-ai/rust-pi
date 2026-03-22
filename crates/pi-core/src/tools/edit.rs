@@ -11,19 +11,17 @@ pub struct EditArgs {
 }
 
 #[derive(Clone)]
-pub struct EditTool {
-    _ctx: ExecutionContext,
-}
+pub struct EditTool;
 
 impl EditTool {
-    pub fn new(ctx: ExecutionContext) -> Self {
-        Self { _ctx: ctx }
+    pub fn new() -> Self {
+        Self
     }
 }
 
 impl Default for EditTool {
     fn default() -> Self {
-        Self::new(ExecutionContext::new(std::path::PathBuf::from(".")))
+        Self::new()
     }
 }
 
@@ -82,7 +80,7 @@ mod tests {
     #[test]
     fn test_edit_file() {
         let (ctx, _temp) = test_ctx();
-        let tool = EditTool::new(ctx.clone());
+        let tool = EditTool::new();
         fs::write(ctx.resolve_path("test.txt").unwrap(), "hello world").unwrap();
         let result = tool.execute(
             serde_json::json!({"path": "test.txt", "find": "world", "replace": "rust"}),
@@ -96,7 +94,7 @@ mod tests {
     #[test]
     fn test_edit_not_found() {
         let (ctx, _temp) = test_ctx();
-        let tool = EditTool::new(ctx.clone());
+        let tool = EditTool::new();
         fs::write(ctx.resolve_path("test.txt").unwrap(), "hello world").unwrap();
         let result = tool.execute(
             serde_json::json!({"path": "test.txt", "find": "nonexistent", "replace": "replacement"}),
@@ -108,7 +106,7 @@ mod tests {
     #[test]
     fn test_edit_path_traversal_rejected() {
         let (ctx, _temp) = test_ctx();
-        let tool = EditTool::new(ctx.clone());
+        let tool = EditTool::new();
         let result = tool.execute(
             serde_json::json!({"path": "../test.txt", "find": "a", "replace": "b"}),
             &ctx,

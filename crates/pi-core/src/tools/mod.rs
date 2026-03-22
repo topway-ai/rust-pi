@@ -8,7 +8,8 @@ pub use edit::EditTool;
 pub use read::ReadTool;
 pub use write::WriteTool;
 
-use crate::{tool_spec::ToolSpec, Result};
+use crate::tool_spec::ToolSpec;
+use crate::Result;
 use std::collections::HashMap;
 
 pub trait Tool: Send + Sync {
@@ -22,22 +23,60 @@ pub trait Tool: Send + Sync {
     ) -> Result<String>;
 }
 
-pub fn make_tools(ctx: &crate::context::ExecutionContext) -> HashMap<String, Box<dyn Tool>> {
-    let mut tools: HashMap<String, Box<dyn Tool>> = HashMap::new();
-    tools.insert(
-        "read".into(),
-        Box::new(ReadTool::new(ctx.clone())) as Box<dyn Tool>,
-    );
-    tools.insert(
-        "write".into(),
-        Box::new(WriteTool::new(ctx.clone())) as Box<dyn Tool>,
-    );
-    tools.insert(
-        "edit".into(),
-        Box::new(EditTool::new(ctx.clone())) as Box<dyn Tool>,
-    );
-    tools.insert("bash".into(), Box::new(BashTool::new()) as Box<dyn Tool>);
-    tools
+pub struct ToolRegistry {
+    tools: Vec<Box<dyn Tool>>,
+    by_name: HashMap<String, usize>,
+}
+
+impl ToolRegistry {
+    pub fn new() -> Self {
+        Self {
+            tools: Vec::new(),
+            by_name: HashMap::new(),
+        }
+    }
+
+    pub fn add(&mut self, tool: Box<dyn Tool>) {
+        let name = tool.name().to_string();
+        if !self.by_name.contains_key(&name) {
+            let idx = self.tools.len();
+            self.by_name.insert(name, idx);
+            self.tools.push(tool);
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
+        self.by_name
+            .get(name)
+            .and_then(|&idx| self.tools.get(idx).map(|t| t.as_ref()))
+    }
+
+    pub fn specs(&self) -> Vec<ToolSpec> {
+        self.tools.iter().map(|t| t.spec()).collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tools.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn default_tools() -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    registry.add(Box::new(ReadTool::new()));
+    registry.add(Box::new(WriteTool::new()));
+    registry.add(Box::new(EditTool::new()));
+    registry.add(Box::new(BashTool::new()));
+    registry
 }
 
 pub fn all_specs() -> Vec<ToolSpec> {

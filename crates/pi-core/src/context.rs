@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
@@ -19,11 +19,20 @@ impl ExecutionContext {
             ));
         }
 
-        let path_str = relative_path.to_string_lossy();
-        if path_str.contains("..") {
-            return Err(super::Error::InvalidInput(
-                "path traversal not allowed".into(),
-            ));
+        for component in relative_path.components() {
+            match component {
+                Component::ParentDir => {
+                    return Err(super::Error::InvalidInput(
+                        "path traversal not allowed".into(),
+                    ));
+                }
+                Component::Prefix(_) | Component::RootDir => {
+                    return Err(super::Error::InvalidInput(
+                        "path contains root or prefix component".into(),
+                    ));
+                }
+                Component::Normal(_) | Component::CurDir => {}
+            }
         }
 
         let target = self.workspace_root.join(relative_path);

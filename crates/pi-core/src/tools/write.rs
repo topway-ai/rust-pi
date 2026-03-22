@@ -10,19 +10,17 @@ pub struct WriteArgs {
 }
 
 #[derive(Clone)]
-pub struct WriteTool {
-    _ctx: ExecutionContext,
-}
+pub struct WriteTool;
 
 impl WriteTool {
-    pub fn new(ctx: ExecutionContext) -> Self {
-        Self { _ctx: ctx }
+    pub fn new() -> Self {
+        Self
     }
 }
 
 impl Default for WriteTool {
     fn default() -> Self {
-        Self::new(ExecutionContext::new(std::path::PathBuf::from(".")))
+        Self::new()
     }
 }
 
@@ -80,7 +78,7 @@ mod tests {
     #[test]
     fn test_write_file_inside_workspace() {
         let (ctx, _temp) = test_ctx();
-        let tool = WriteTool::new(ctx.clone());
+        let tool = WriteTool::new();
         let result = tool.execute(
             serde_json::json!({"path": "test.txt", "content": "hello world"}),
             &ctx,
@@ -93,7 +91,7 @@ mod tests {
     #[test]
     fn test_write_nested_path() {
         let (ctx, _temp) = test_ctx();
-        let tool = WriteTool::new(ctx.clone());
+        let tool = WriteTool::new();
         let result = tool.execute(
             serde_json::json!({"path": "a/b/c.txt", "content": "nested"}),
             &ctx,
@@ -106,7 +104,7 @@ mod tests {
     #[test]
     fn test_write_path_traversal_rejected() {
         let (ctx, _temp) = test_ctx();
-        let tool = WriteTool::new(ctx.clone());
+        let tool = WriteTool::new();
         let result = tool.execute(
             serde_json::json!({"path": "../test.txt", "content": "bad"}),
             &ctx,

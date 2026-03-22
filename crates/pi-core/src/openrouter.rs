@@ -69,7 +69,7 @@ impl Provider for OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
-    fn build_request(&self, messages: &[Message]) -> ChatRequest {
+    pub(crate) fn build_request(&self, messages: &[Message]) -> ChatRequest {
         let messages: Vec<ChatMessage> = messages
             .iter()
             .map(|m| ChatMessage {
@@ -111,7 +111,7 @@ impl OpenRouterProvider {
         }
     }
 
-    fn parse_response(&self, response: OpenAIResponse) -> Result<ProviderResponse> {
+    pub(crate) fn parse_response(&self, response: OpenAIResponse) -> Result<ProviderResponse> {
         let choice = response
             .choices
             .into_iter()
@@ -140,7 +140,7 @@ impl OpenRouterProvider {
 }
 
 #[derive(Debug, Serialize)]
-struct ChatRequest {
+pub(crate) struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     tools: Option<Vec<ToolDefinition>>,
@@ -168,7 +168,7 @@ struct FunctionDefinition {
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAIResponse {
+pub(crate) struct OpenAIResponse {
     choices: Vec<Choice>,
 }
 
@@ -194,4 +194,127 @@ struct ToolCall {
 struct FunctionCall {
     name: String,
     arguments: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool_spec::ToolSpec;
+
+    #[test]
+    fn test_build_request_uses_shared_tool_specs() {
+        let specs = vec![
+            ToolSpec {
+                name: "read",
+                description: "read file",
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }),
+            },
+            ToolSpec {
+                name: "bash",
+                description: "run command",
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"]
+                }),
+            },
+        ];
+        let provider = OpenRouterProvider::with_tools("test-key", "test-model", specs);
+        let messages = vec![Message::user("test")];
+        let request = provider.build_request(&messages);
+
+        let tools = request.tools.unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].function.name, "read");
+        assert_eq!(tools[1].function.name, "bash");
+    }
+
+    #[test]
+    fn test_parse_text_response() {
+        let provider = OpenRouterProvider::new("key", "model");
+        let response = OpenAIResponse {
+            choices: vec![Choice {
+                message: ResponseMessage {
+                    content: Some("Hello, world!".to_string()),
+                    tool_calls: None,
+                },
+            }],
+        };
+        let result = provider.parse_response(response).unwrap();
+        match result {
+            ProviderResponse::Message(msg) => {
+                assert_eq!(msg.as_text().unwrap(), "Hello, world!");
+            }
+            _ => panic!("expected message"),
+        }
+    }
+
+    #[test]
+    fn test_parse_tool_call_response() {
+        let provider = OpenRouterProvider::new("key", "model");
+        let response = OpenAIResponse {
+            choices: vec![Choice {
+                message: ResponseMessage {
+                    content: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_123".to_string(),
+                        function: FunctionCall {
+                            name: "read".to_string(),
+                            arguments: r#"{"path": "test.txt"}"#.to_string(),
+                        },
+                    }]),
+                },
+            }],
+        };
+        let result = provider.parse_response(response).unwrap();
+        match result {
+            ProviderResponse::ToolCall { id, name, args } => {
+                assert_eq!(id, "call_123");
+                assert_eq!(name, "read");
+                assert_eq!(args["path"], "test.txt");
+            }
+            _ => panic!("expected tool call"),
+        }
+    }
+
+    #[test]
+    fn test_parse_malformed_tool_args_fails() {
+        let provider = OpenRouterProvider::new("key", "model");
+        let response = OpenAIResponse {
+            choices: vec![Choice {
+                message: ResponseMessage {
+                    content: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_123".to_string(),
+                        function: FunctionCall {
+                            name: "read".to_string(),
+                            arguments: "not json".to_string(),
+                        },
+                    }]),
+                },
+            }],
+        };
+        let result = provider.parse_response(response);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tool_order_deterministic() {
+        let specs = all_specs();
+        let provider = OpenRouterProvider::with_tools("key", "model", specs);
+        let messages = vec![Message::user("test")];
+        let request1 = provider.build_request(&messages);
+        let request2 = provider.build_request(&messages);
+
+        let tools1 = request1.tools.unwrap();
+        let tools2 = request2.tools.unwrap();
+        assert_eq!(tools1.len(), tools2.len());
+        for (t1, t2) in tools1.iter().zip(tools2.iter()) {
+            assert_eq!(t1.function.name, t2.function.name);
+        }
+    }
 }

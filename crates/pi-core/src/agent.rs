@@ -1,33 +1,31 @@
 use crate::context::ExecutionContext;
 use crate::prompt;
 use crate::session::Session;
-use crate::tools::Tool;
+use crate::tools::{Tool, ToolRegistry};
 use crate::{Error, Message, Provider, ProviderResponse, Result};
-use std::collections::HashMap;
 
 pub struct Agent {
     session: Session,
     provider: Box<dyn Provider>,
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: ToolRegistry,
 }
 
 impl Agent {
     pub fn new(provider: Box<dyn Provider>, tools: Vec<Box<dyn Tool>>) -> Self {
-        let tools: HashMap<_, _> = tools
-            .into_iter()
-            .map(|t| (t.name().to_string(), t))
-            .collect();
+        let mut registry = ToolRegistry::new();
+        for tool in tools {
+            registry.add(tool);
+        }
         Self {
             session: Session::new(),
             provider,
-            tools,
+            tools: registry,
         }
     }
 
     pub fn run(&mut self, ctx: &ExecutionContext, instruction: &str) -> Result<String> {
         self.session.add_message(Message::user(instruction));
-        let specs: Vec<_> = self.tools.values().map(|t| t.spec()).collect();
-        let system_prompt = prompt::build_system_prompt(&specs);
+        let system_prompt = prompt::build_system_prompt(&self.tools.specs());
         self.session.set_system_prompt(&system_prompt);
         loop {
             let response = self.provider.complete(&self.session.messages())?;

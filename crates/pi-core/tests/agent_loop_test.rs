@@ -1,6 +1,6 @@
 use pi_core::{
     context::ExecutionContext,
-    tools::{make_tools, Tool},
+    tools::{BashTool, EditTool, ReadTool, Tool, WriteTool},
     Agent, Message, ProviderResponse, ScriptedProvider,
 };
 use tempfile::TempDir;
@@ -11,8 +11,13 @@ fn make_test_context() -> (ExecutionContext, TempDir) {
     (ExecutionContext::new(root), temp)
 }
 
-fn make_tools_for_test(ctx: &ExecutionContext) -> Vec<Box<dyn Tool>> {
-    make_tools(ctx).into_values().collect()
+fn make_tools() -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(ReadTool::new()) as Box<dyn Tool>,
+        Box::new(WriteTool::new()) as Box<dyn Tool>,
+        Box::new(EditTool::new()) as Box<dyn Tool>,
+        Box::new(BashTool::new()) as Box<dyn Tool>,
+    ]
 }
 
 #[test]
@@ -22,7 +27,7 @@ fn test_agent_returns_final_response() {
         "Hello, how can I help?",
     ))];
     let provider = Box::new(ScriptedProvider::new(responses));
-    let mut agent = Agent::new(provider, make_tools_for_test(&ctx));
+    let mut agent = Agent::new(provider, make_tools());
 
     let result = agent.run(&ctx, "say hello");
     assert!(result.is_ok());
@@ -41,7 +46,7 @@ fn test_agent_executes_tool_and_continues() {
         ProviderResponse::Message(Message::assistant("Command executed successfully")),
     ];
     let provider = Box::new(ScriptedProvider::new(responses));
-    let mut agent = Agent::new(provider, make_tools_for_test(&ctx));
+    let mut agent = Agent::new(provider, make_tools());
 
     let result = agent.run(&ctx, "run a command");
     assert!(result.is_ok());
@@ -62,7 +67,7 @@ fn test_agent_reads_file() {
         ProviderResponse::Message(Message::assistant("File contains: hello world")),
     ];
     let provider = Box::new(ScriptedProvider::new(responses));
-    let mut agent = Agent::new(provider, make_tools_for_test(&ctx));
+    let mut agent = Agent::new(provider, make_tools());
 
     let result = agent.run(&ctx, "read the file");
     assert!(result.is_ok());

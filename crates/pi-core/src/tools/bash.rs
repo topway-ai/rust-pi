@@ -37,12 +37,13 @@ impl crate::tools::Tool for BashTool {
         ToolSpec::bash()
     }
 
-    fn execute(&self, args: serde_json::Value, _ctx: &ExecutionContext) -> Result<String> {
+    fn execute(&self, args: serde_json::Value, ctx: &ExecutionContext) -> Result<String> {
         let args: BashArgs =
             serde_json::from_value(args).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let output = Command::new("sh")
             .arg("-c")
             .arg(&args.command)
+            .current_dir(&ctx.workspace_root)
             .output()
             .map_err(|e| Error::ToolFailed(format!("failed to execute command: {}", e)))?;
         format_output(output)
@@ -73,11 +74,13 @@ mod tests {
     use super::*;
     use crate::context::ExecutionContext;
     use crate::tools::Tool;
+    use tempfile::TempDir;
 
     #[test]
     fn test_bash_echo() {
+        let temp = TempDir::new().unwrap();
+        let ctx = ExecutionContext::new(temp.path().to_path_buf());
         let tool = BashTool::new();
-        let ctx = ExecutionContext::new(std::path::PathBuf::from("."));
         let result = tool.execute(serde_json::json!({"command": "echo hello"}), &ctx);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("hello"));
@@ -85,10 +88,22 @@ mod tests {
 
     #[test]
     fn test_bash_exit_code() {
+        let temp = TempDir::new().unwrap();
+        let ctx = ExecutionContext::new(temp.path().to_path_buf());
         let tool = BashTool::new();
-        let ctx = ExecutionContext::new(std::path::PathBuf::from("."));
         let result = tool.execute(serde_json::json!({"command": "exit 1"}), &ctx);
         assert!(result.is_ok());
         assert!(result.unwrap().contains("exit status:"));
+    }
+
+    #[test]
+    fn test_bash_respects_workspace_root() {
+        let temp = TempDir::new().unwrap();
+        let ctx = ExecutionContext::new(temp.path().to_path_buf());
+        let tool = BashTool::new();
+        let result = tool.execute(serde_json::json!({"command": "pwd"}), &ctx);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains(&temp.path().to_string_lossy().to_string()));
     }
 }
