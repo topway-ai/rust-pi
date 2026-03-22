@@ -9,11 +9,12 @@ impl ToolSpec {
     pub fn read() -> Self {
         Self {
             name: "read",
-            description: "read file contents",
+            description:
+                "read text file contents (max 64KB, truncated if larger; binary files rejected)",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"}
+                    "path": {"type": "string", "description": "relative path to text file"}
                 },
                 "required": ["path"]
             }),
@@ -55,7 +56,7 @@ impl ToolSpec {
     pub fn bash() -> Self {
         Self {
             name: "bash",
-            description: "execute bash command locally in workspace (trusted local execution)",
+            description: "execute bash command locally in workspace (trusted local execution; output truncated at 64KB per stream)",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

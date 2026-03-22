@@ -4,6 +4,8 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Output};
 
+const MAX_OUTPUT_SIZE: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BashArgs {
     pub command: String,
@@ -43,18 +45,54 @@ impl crate::tools::Tool for BashTool {
 }
 
 fn format_output(output: Output) -> Result<String> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout_raw = &output.stdout;
+    let stderr_raw = &output.stderr;
     let status = output.status;
+
+    let stdout_len = stdout_raw.len();
+    let stderr_len = stderr_raw.len();
+
+    let mut stdout_truncated = false;
+    let mut stderr_truncated = false;
+
+    let stdout_bytes = if stdout_len > MAX_OUTPUT_SIZE {
+        stdout_truncated = true;
+        &stdout_raw[..MAX_OUTPUT_SIZE]
+    } else {
+        stdout_raw.as_slice()
+    };
+
+    let stderr_bytes = if stderr_len > MAX_OUTPUT_SIZE {
+        stderr_truncated = true;
+        &stderr_raw[..MAX_OUTPUT_SIZE]
+    } else {
+        stderr_raw.as_slice()
+    };
+
+    let stdout = String::from_utf8_lossy(stdout_bytes);
+    let stderr = String::from_utf8_lossy(stderr_bytes);
+
     let mut result = String::new();
-    if !stdout.is_empty() {
+    if !stdout_raw.is_empty() {
         result.push_str("stdout:\n");
         result.push_str(&stdout);
+        if stdout_truncated {
+            result.push_str(&format!(
+                "\n[Output truncated: {} bytes total, showing first {}]\n",
+                stdout_len, MAX_OUTPUT_SIZE
+            ));
+        }
         result.push('\n');
     }
-    if !stderr.is_empty() {
+    if !stderr_raw.is_empty() {
         result.push_str("stderr:\n");
         result.push_str(&stderr);
+        if stderr_truncated {
+            result.push_str(&format!(
+                "\n[Output truncated: {} bytes total, showing first {}]\n",
+                stderr_len, MAX_OUTPUT_SIZE
+            ));
+        }
         result.push('\n');
     }
     result.push_str(&format!("exit status: {}", status));
@@ -97,5 +135,20 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.contains(&temp.path().to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn test_bash_output_not_truncated_for_small_output() {
+        let temp = TempDir::new().unwrap();
+        let ctx = ExecutionContext::new(temp.path().to_path_buf());
+        let tool = BashTool::new();
+        let result = tool.execute(serde_json::json!({"command": "echo 'short output'"}), &ctx);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            !output.contains("truncated"),
+            "small output should not be truncated: {}",
+            output
+        );
     }
 }

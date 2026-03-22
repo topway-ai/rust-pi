@@ -8,6 +8,9 @@ pub enum Error {
     #[error("edit failed: {0}")]
     EditFailed(String),
 
+    #[error("read failed: {0}")]
+    ReadFailed(String),
+
     #[error("agent loop error: {0}")]
     AgentLoop(String),
 
