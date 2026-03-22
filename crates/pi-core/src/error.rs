@@ -5,6 +5,12 @@ pub enum Error {
     #[error("tool execution failed: {0}")]
     ToolFailed(String),
 
+    #[error("edit failed: {0}")]
+    EditFailed(String),
+
+    #[error("agent loop error: {0}")]
+    AgentLoop(String),
+
     #[error("provider error: {0}")]
     Provider(String),
 

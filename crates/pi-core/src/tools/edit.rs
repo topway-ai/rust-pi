@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditArgs {
     pub path: String,
-    pub find: String,
-    pub replace: String,
+    pub old_text: String,
+    pub new_text: String,
+    #[serde(default)]
+    pub replace_all: bool,
 }
 
 #[derive(Clone)]
@@ -38,20 +40,46 @@ impl crate::tools::Tool for EditTool {
             Error::ToolFailed(format!("failed to read {}: {}", full_path.display(), e))
         })?;
 
-        if !content.contains(&args.find) {
-            return Err(Error::ToolFailed(format!(
-                "string '{}' not found in {}",
-                args.find,
+        let matches: Vec<usize> = content
+            .match_indices(&args.old_text)
+            .map(|(i, _)| i)
+            .collect();
+
+        if matches.is_empty() {
+            return Err(Error::EditFailed(format!(
+                "text '{}' not found in {}",
+                args.old_text,
                 full_path.display()
             )));
         }
 
-        let new_content = content.replacen(&args.find, &args.replace, 1);
-        std::fs::write(&full_path, &new_content).map_err(|e| {
-            Error::ToolFailed(format!("failed to write {}: {}", full_path.display(), e))
-        })?;
+        let count = if args.replace_all {
+            let new_content = content.replace(&args.old_text, &args.new_text);
+            std::fs::write(&full_path, &new_content).map_err(|e| {
+                Error::ToolFailed(format!("failed to write {}: {}", full_path.display(), e))
+            })?;
+            matches.len()
+        } else {
+            if matches.len() > 1 {
+                return Err(Error::EditFailed(format!(
+                    "ambiguous edit: '{}' occurs {} times in {}, use replace_all to replace all occurrences",
+                    args.old_text,
+                    matches.len(),
+                    full_path.display()
+                )));
+            }
+            let new_content = content.replacen(&args.old_text, &args.new_text, 1);
+            std::fs::write(&full_path, &new_content).map_err(|e| {
+                Error::ToolFailed(format!("failed to write {}: {}", full_path.display(), e))
+            })?;
+            1
+        };
 
-        Ok(format!("replaced 1 occurrence in {}", full_path.display()))
+        Ok(format!(
+            "replaced {} occurrence(s) in {}",
+            count,
+            full_path.display()
+        ))
     }
 }
 
@@ -70,12 +98,12 @@ mod tests {
     }
 
     #[test]
-    fn test_edit_file() {
+    fn test_edit_unique_match() {
         let (ctx, _temp) = test_ctx();
         let tool = EditTool::new();
         fs::write(ctx.resolve_path("test.txt").unwrap(), "hello world").unwrap();
         let result = tool.execute(
-            serde_json::json!({"path": "test.txt", "find": "world", "replace": "rust"}),
+            serde_json::json!({"path": "test.txt", "old_text": "world", "new_text": "rust"}),
             &ctx,
         );
         assert!(result.is_ok(), "{:?}", result);
@@ -89,10 +117,48 @@ mod tests {
         let tool = EditTool::new();
         fs::write(ctx.resolve_path("test.txt").unwrap(), "hello world").unwrap();
         let result = tool.execute(
-            serde_json::json!({"path": "test.txt", "find": "nonexistent", "replace": "replacement"}),
+            serde_json::json!({"path": "test.txt", "old_text": "nonexistent", "new_text": "replacement"}),
             &ctx,
         );
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "expected not found error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_edit_ambiguous_without_replace_all() {
+        let (ctx, _temp) = test_ctx();
+        let tool = EditTool::new();
+        fs::write(ctx.resolve_path("test.txt").unwrap(), "foo bar foo").unwrap();
+        let result = tool.execute(
+            serde_json::json!({"path": "test.txt", "old_text": "foo", "new_text": "baz"}),
+            &ctx,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("ambiguous"),
+            "expected ambiguous error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_edit_replace_all() {
+        let (ctx, _temp) = test_ctx();
+        let tool = EditTool::new();
+        fs::write(ctx.resolve_path("test.txt").unwrap(), "foo bar foo").unwrap();
+        let result = tool.execute(
+            serde_json::json!({"path": "test.txt", "old_text": "foo", "new_text": "baz", "replace_all": true}),
+            &ctx,
+        );
+        assert!(result.is_ok(), "{:?}", result);
+        let content = fs::read_to_string(ctx.resolve_path("test.txt").unwrap()).unwrap();
+        assert_eq!(content, "baz bar baz");
     }
 
     #[test]
@@ -100,9 +166,31 @@ mod tests {
         let (ctx, _temp) = test_ctx();
         let tool = EditTool::new();
         let result = tool.execute(
-            serde_json::json!({"path": "../test.txt", "find": "a", "replace": "b"}),
+            serde_json::json!({"path": "../test.txt", "old_text": "a", "new_text": "b"}),
             &ctx,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_edit_deterministic_single_replacement() {
+        let (ctx, _temp) = test_ctx();
+        let tool = EditTool::new();
+        fs::write(
+            ctx.resolve_path("test.txt").unwrap(),
+            "line1\nfoo\nline3\nfoo\nline5",
+        )
+        .unwrap();
+        let result = tool.execute(
+            serde_json::json!({"path": "test.txt", "old_text": "foo", "new_text": "bar"}),
+            &ctx,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("ambiguous"),
+            "expected ambiguous error: {}",
+            err
+        );
     }
 }
