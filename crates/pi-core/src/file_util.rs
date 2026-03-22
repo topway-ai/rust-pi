@@ -5,10 +5,6 @@ pub fn is_likely_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|&b| b == 0)
 }
 
-pub fn read_text_file(path: &Path) -> Result<String> {
-    read_text_file_with_limit(path, 64 * 1024)
-}
-
 pub fn read_text_file_with_limit(path: &Path, max_bytes: usize) -> Result<String> {
     let bytes = std::fs::read(path)
         .map_err(|e| Error::ToolFailed(format!("failed to read {}: {}", path.display(), e)))?;
@@ -35,6 +31,36 @@ pub fn read_text_file_with_limit(path: &Path, max_bytes: usize) -> Result<String
 
     String::from_utf8(bytes).map_err(|_| {
         Error::ReadFailed(format!(
+            "file is valid UTF-8 text but read failed: {}",
+            path.display()
+        ))
+    })
+}
+
+pub fn read_text_file_for_edit(path: &Path, max_bytes: usize) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| Error::ToolFailed(format!("failed to read {}: {}", path.display(), e)))?;
+
+    let file_size = bytes.len();
+
+    if file_size > max_bytes {
+        return Err(Error::EditFailed(format!(
+            "file too large to edit safely: {} ({} bytes) exceeds limit of {} bytes. Consider splitting the file or increasing the edit size limit.",
+            path.display(),
+            file_size,
+            max_bytes
+        )));
+    }
+
+    if is_likely_binary(&bytes) {
+        return Err(Error::EditFailed(format!(
+            "binary/non-text file cannot be edited: {}",
+            path.display()
+        )));
+    }
+
+    String::from_utf8(bytes).map_err(|_| {
+        Error::EditFailed(format!(
             "file is valid UTF-8 text but read failed: {}",
             path.display()
         ))

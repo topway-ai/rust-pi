@@ -1,5 +1,5 @@
 use crate::context::ToolContext;
-use crate::file_util::{atomic_write, read_text_file};
+use crate::file_util::{atomic_write, read_text_file_for_edit};
 use crate::tool_spec::ToolSpec;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,7 @@ impl crate::tools::Tool for EditTool {
         let args: EditArgs =
             serde_json::from_value(args).map_err(|e| Error::InvalidInput(e.to_string()))?;
         let full_path = ctx.exec.resolve_path(&args.path)?;
-        let content = read_text_file(&full_path)?;
+        let content = read_text_file_for_edit(&full_path, ctx.runtime.max_read_bytes)?;
 
         let matches: Vec<usize> = content
             .match_indices(&args.old_text)
@@ -221,5 +221,49 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("binary"), "expected binary rejection: {}", err);
+    }
+
+    #[test]
+    fn test_edit_oversized_file_fails_clearly() {
+        let temp = TempDir::new().unwrap();
+        let exec = ExecutionContext::new(temp.path().to_path_buf());
+        let runtime = RuntimeOptions::default().with_max_read_bytes(100);
+        let ctx = ToolContext::new(&exec, &runtime);
+        let tool = EditTool::new();
+        let large_content = "x".repeat(200);
+        fs::write(ctx.exec.resolve_path("large.txt").unwrap(), &large_content).unwrap();
+        let result = tool.execute(
+            serde_json::json!({"path": "large.txt", "old_text": "a", "new_text": "b"}),
+            &ctx,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("too large"),
+            "expected 'too large' error, got: {}",
+            err
+        );
+        assert!(
+            err.contains("200") && err.contains("100"),
+            "expected error to mention file size and limit, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_edit_respects_custom_max_read_bytes() {
+        let temp = TempDir::new().unwrap();
+        let exec = ExecutionContext::new(temp.path().to_path_buf());
+        let runtime = RuntimeOptions::default().with_max_read_bytes(50);
+        let ctx = ToolContext::new(&exec, &runtime);
+        let tool = EditTool::new();
+        fs::write(ctx.exec.resolve_path("test.txt").unwrap(), "hello world").unwrap();
+        let result = tool.execute(
+            serde_json::json!({"path": "test.txt", "old_text": "world", "new_text": "rust"}),
+            &ctx,
+        );
+        assert!(result.is_ok(), "{:?}", result);
+        let content = fs::read_to_string(ctx.exec.resolve_path("test.txt").unwrap()).unwrap();
+        assert_eq!(content, "hello rust");
     }
 }

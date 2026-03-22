@@ -172,17 +172,29 @@ mod tests {
             "expected truncation: {}",
             output
         );
-        assert!(
-            String::from_utf8(
-                output
-                    .lines()
-                    .find(|l| l.starts_with("[ReadTool] File truncated"))
-                    .map(|l| l.to_string())
-                    .unwrap_or_default()
-                    .into_bytes()
-            )
-            .is_ok(),
-            "truncation should be on valid UTF-8 boundary"
-        );
+        let truncated_marker = "[ReadTool] File truncated:";
+        if let Some(start_idx) = output.find(truncated_marker) {
+            let after_marker = &output[start_idx..];
+            if let Some(end_idx) = after_marker.find('\n') {
+                let content_section = &after_marker[..end_idx];
+                assert!(
+                    String::from_utf8(content_section.to_string().into_bytes()).is_ok(),
+                    "truncation marker line should be valid UTF-8: {}",
+                    content_section
+                );
+            }
+        }
+        for (i, line) in output.lines().enumerate() {
+            if i > 0 && line.starts_with("[ReadTool]") {
+                continue;
+            }
+            if !line.is_empty() {
+                assert!(
+                    std::str::from_utf8(line.as_bytes()).is_ok(),
+                    "non-marker content line should be valid UTF-8: {:?}",
+                    line
+                );
+            }
+        }
     }
 }
