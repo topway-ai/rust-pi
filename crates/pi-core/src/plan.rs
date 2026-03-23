@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum TodoStatus {
     Pending,
+    #[serde(alias = "in_progress", alias = "inprogress")]
     InProgress,
     Done,
 }

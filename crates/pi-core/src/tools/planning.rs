@@ -55,7 +55,7 @@ impl crate::tools::Tool for UpdatePlanTool {
                             "type": "object",
                             "properties": {
                                 "content": {"type": "string"},
-                                "status": {"type": "string", "enum": ["pending", "inprogress", "done"]}
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}
                             },
                             "required": ["content", "status"]
                         }
@@ -139,7 +139,7 @@ mod tests {
 
         let args = serde_json::json!({
             "items": [
-                {"content": "New task", "status": "inprogress"}
+                {"content": "New task", "status": "in_progress"}
             ]
         });
 
@@ -152,5 +152,68 @@ mod tests {
         let plan_guard = plan.lock().unwrap();
         assert_eq!(plan_guard.items().len(), 1);
         assert_eq!(plan_guard.items()[0].description, "New task");
+    }
+
+    #[test]
+    fn test_update_plan_accepts_inprogress_alias() {
+        let plan = Arc::new(std::sync::Mutex::new(Plan::new()));
+        let tool = UpdatePlanTool::with_plan(plan.clone());
+
+        let exec = crate::context::ExecutionContext::new(std::path::PathBuf::from("/tmp"));
+        let runtime = crate::runtime::RuntimeOptions::default();
+        let ctx = crate::context::ToolContext::new(&exec, &runtime);
+
+        let args = serde_json::json!({
+            "items": [
+                {"content": "Task with inprogress alias", "status": "inprogress"}
+            ]
+        });
+
+        let result = tool.execute(args, &ctx);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_update_plan_clears_with_empty_items() {
+        let plan = Arc::new(std::sync::Mutex::new(Plan::new()));
+        plan.lock().unwrap().add_item("Old task".to_string());
+        assert!(!plan.lock().unwrap().is_empty());
+
+        let tool = UpdatePlanTool::with_plan(plan.clone());
+
+        let exec = crate::context::ExecutionContext::new(std::path::PathBuf::from("/tmp"));
+        let runtime = crate::runtime::RuntimeOptions::default();
+        let ctx = crate::context::ToolContext::new(&exec, &runtime);
+
+        let args = serde_json::json!({
+            "items": []
+        });
+
+        let result = tool.execute(args, &ctx);
+        assert!(result.is_ok());
+        assert!(plan.lock().unwrap().is_empty());
+        let output = result.unwrap();
+        assert!(output.contains("no plan"));
+    }
+
+    #[test]
+    fn test_update_plan_rejects_invalid_status() {
+        let plan = Arc::new(std::sync::Mutex::new(Plan::new()));
+        let tool = UpdatePlanTool::with_plan(plan.clone());
+
+        let exec = crate::context::ExecutionContext::new(std::path::PathBuf::from("/tmp"));
+        let runtime = crate::runtime::RuntimeOptions::default();
+        let ctx = crate::context::ToolContext::new(&exec, &runtime);
+
+        let args = serde_json::json!({
+            "items": [
+                {"content": "Bad status task", "status": "invalid_status"}
+            ]
+        });
+
+        let result = tool.execute(args, &ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("invalid") || err.to_string().contains("InvalidInput"));
     }
 }

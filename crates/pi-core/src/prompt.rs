@@ -6,12 +6,11 @@ When a PI.md file exists in the workspace root, it contains project-specific gui
 Always check for PI.md at the start of a session and respect its instructions.\n";
 
 pub const PLANNING_SECTION: &str = "## Planning\n\
-\
-For non-trivial coding tasks, create and maintain an explicit plan:\n\
-- Use the plan system to track multi-step work\n\
-- Break down complex tasks into clear, ordered steps\n\
-- Update plan item statuses as you complete them\n\
-- Keep the plan visible in your reasoning throughout the session\n";
+\nFor non-trivial multi-step tasks, use update_plan to create a plan:\n\
+- update_plan with items: [{content, status: \"pending\"|\"in_progress\"|\"done\"}]\n\
+- Skip planning for simple one-step tasks\n\
+- Update plan item statuses as you complete each step\n\
+- When all items are done, the plan can be cleared or left as record\n";
 
 pub const GIT_CONTEXT_SECTION: &str = "## Git Context\n\
 \
