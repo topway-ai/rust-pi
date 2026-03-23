@@ -5,7 +5,7 @@ pub struct RuntimeOptions {
     pub max_read_bytes: usize,
     pub max_bash_output_bytes: usize,
     pub provider_timeout_secs: u64,
-    pub max_messages_before_compaction: usize,
+    pub max_messages_before_truncation: usize,
 }
 
 impl Default for RuntimeOptions {
@@ -16,7 +16,7 @@ impl Default for RuntimeOptions {
             max_read_bytes: 64 * 1024,
             max_bash_output_bytes: 64 * 1024,
             provider_timeout_secs: 120,
-            max_messages_before_compaction: 100,
+            max_messages_before_truncation: 100,
         }
     }
 }
@@ -51,11 +51,11 @@ impl RuntimeOptions {
         self
     }
 
-    pub fn with_max_messages_before_compaction(
+    pub fn with_max_messages_before_truncation(
         mut self,
-        max_messages_before_compaction: usize,
+        max_messages_before_truncation: usize,
     ) -> Self {
-        self.max_messages_before_compaction = max_messages_before_compaction;
+        self.max_messages_before_truncation = max_messages_before_truncation;
         self
     }
 }

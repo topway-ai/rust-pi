@@ -1,9 +1,8 @@
-use crate::commands::CommandRegistry;
 use crate::context::{ExecutionContext, ToolContext};
 use crate::external::ExternalToolRegistry;
 use crate::hooks::HookRegistry;
 use crate::plan::Plan;
-use crate::project::load_project_instructions;
+use crate::project::get_project_instructions_or_error;
 use crate::prompt;
 use crate::runtime::RuntimeOptions;
 use crate::session::Session;
@@ -18,7 +17,6 @@ pub struct Agent {
     external_tools: ExternalToolRegistry,
     options: RuntimeOptions,
     plan: Plan,
-    commands: CommandRegistry,
     hooks: HookRegistry,
 }
 
@@ -43,7 +41,6 @@ impl Agent {
             external_tools: ExternalToolRegistry::new(),
             options,
             plan: Plan::new(),
-            commands: CommandRegistry::new(),
             hooks: HookRegistry::new(),
         }
     }
@@ -54,14 +51,6 @@ impl Agent {
 
     pub fn plan_mut(&mut self) -> &mut Plan {
         &mut self.plan
-    }
-
-    pub fn commands(&self) -> &CommandRegistry {
-        &self.commands
-    }
-
-    pub fn commands_mut(&mut self) -> &mut CommandRegistry {
-        &mut self.commands
     }
 
     pub fn hooks(&self) -> &HookRegistry {
@@ -88,17 +77,12 @@ impl Agent {
     pub fn run(&mut self, ctx: &ExecutionContext, instruction: &str) -> Result<String> {
         self.session.add_message(Message::user(instruction));
 
-        let mut system_prompt = prompt::build_system_prompt(&self.tools.specs());
+        let mut system_prompt =
+            prompt::build_system_prompt(&self.tools.specs(), &self.external_tools.specs());
 
-        if !self.external_tools.is_empty() {
-            system_prompt.push_str("\nExternal tools:\n\n");
-            for spec in self.external_tools.specs() {
-                system_prompt.push_str(&format!("- {}: {}\n", spec.name, spec.description));
-            }
-            system_prompt.push('\n');
-        }
-
-        if let Ok(Some(project_instructions)) = load_project_instructions(&ctx.workspace_root) {
+        if let Ok(Some(project_instructions)) =
+            get_project_instructions_or_error(&ctx.workspace_root)
+        {
             system_prompt.push_str("\n## Project Instructions (from PI.md)\n\n");
             system_prompt.push_str(&project_instructions);
             system_prompt.push('\n');
@@ -201,11 +185,11 @@ impl Agent {
                                     ));
                                     empty_response_retries = 0;
                                     if self.session.message_count()
-                                        > self.options.max_messages_before_compaction
+                                        > self.options.max_messages_before_truncation
                                     {
                                         let keep_recent =
-                                            self.options.max_messages_before_compaction / 2;
-                                        self.session.compact(keep_recent);
+                                            self.options.max_messages_before_truncation / 2;
+                                        self.session.truncate_history(keep_recent);
                                     }
                                     continue;
                                 }
@@ -214,10 +198,10 @@ impl Agent {
                                 .add_message(Message::tool_result(id, result_str));
                             empty_response_retries = 0;
                             if self.session.message_count()
-                                > self.options.max_messages_before_compaction
+                                > self.options.max_messages_before_truncation
                             {
-                                let keep_recent = self.options.max_messages_before_compaction / 2;
-                                self.session.compact(keep_recent);
+                                let keep_recent = self.options.max_messages_before_truncation / 2;
+                                self.session.truncate_history(keep_recent);
                             }
                             continue;
                         }
@@ -275,9 +259,9 @@ impl Agent {
                     self.session.add_message(Message::tool_result(id, result));
                     empty_response_retries = 0;
 
-                    if self.session.message_count() > self.options.max_messages_before_compaction {
-                        let keep_recent = self.options.max_messages_before_compaction / 2;
-                        self.session.compact(keep_recent);
+                    if self.session.message_count() > self.options.max_messages_before_truncation {
+                        let keep_recent = self.options.max_messages_before_truncation / 2;
+                        self.session.truncate_history(keep_recent);
                     }
                 }
                 ProviderResponse::RequiresInput => {

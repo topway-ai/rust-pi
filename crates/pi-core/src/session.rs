@@ -36,7 +36,7 @@ impl Session {
         self.messages.clear();
     }
 
-    pub fn compact(&mut self, keep_recent: usize) {
+    pub fn truncate_history(&mut self, keep_recent: usize) {
         if self.messages.len() <= keep_recent {
             return;
         }
@@ -48,7 +48,7 @@ impl Session {
 
         self.messages.clear();
         self.messages.push(Message::system(format!(
-            "[Previous {} messages summarized due to context length.]\nUse tools to re-read files if you need to recall earlier context.",
+            "[Previous {} messages truncated due to context length.]\nUse tools to re-read files if you need to recall earlier context.",
             dropped_count
         )));
         self.messages.extend(recent);
@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn test_session_compact_keeps_recent_messages() {
+    fn test_session_truncate_history_keeps_recent_messages() {
         let mut session = Session::new();
         session.set_system_prompt("base prompt");
         for i in 0..20 {
@@ -95,31 +95,31 @@ mod tests {
         }
         assert_eq!(session.message_count(), 20);
 
-        session.compact(5);
+        session.truncate_history(5);
 
         assert_eq!(session.message_count(), 6);
         let msgs = session.messages();
         assert_eq!(msgs.len(), 7);
         assert_eq!(msgs[0].role, crate::Role::System);
-        assert!(msgs[1].as_text().unwrap().contains("summarized"));
+        assert!(msgs[1].as_text().unwrap().contains("truncated"));
         assert!(msgs[1].as_text().unwrap().contains("15"));
         assert!(msgs[2].as_text().unwrap().contains("message 15"));
     }
 
     #[test]
-    fn test_session_compact_does_nothing_when_small() {
+    fn test_session_truncate_history_does_nothing_when_small() {
         let mut session = Session::new();
         session.add_message(Message::user("hello"));
         session.add_message(Message::user("world"));
         assert_eq!(session.message_count(), 2);
 
-        session.compact(10);
+        session.truncate_history(10);
 
         assert_eq!(session.message_count(), 2);
     }
 
     #[test]
-    fn test_session_compact_preserves_order() {
+    fn test_session_truncate_history_preserves_order() {
         let mut session = Session::new();
         session.set_system_prompt("base");
         for i in 0..10 {
@@ -127,7 +127,7 @@ mod tests {
         }
         assert_eq!(session.message_count(), 10);
 
-        session.compact(3);
+        session.truncate_history(3);
 
         assert_eq!(session.message_count(), 4);
         let msgs: Vec<_> = session
@@ -136,7 +136,7 @@ mod tests {
             .map(|m| m.as_text().unwrap().to_string())
             .collect();
         assert_eq!(msgs[0], "base");
-        assert!(msgs[1].contains("summarized"));
+        assert!(msgs[1].contains("truncated"));
         assert!(msgs[2].contains("msg7"));
         assert!(msgs[3].contains("msg8"));
         assert!(msgs[4].contains("msg9"));

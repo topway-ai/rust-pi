@@ -17,7 +17,6 @@ pub mod tool_spec;
 pub mod tools;
 
 pub use agent::Agent;
-pub use commands::{CommandRegistry, CommandStep, CustomCommand};
 pub use context::ExecutionContext;
 pub use error::{Error, Result};
 pub use external::{ExternalTool, ExternalToolRegistry};
@@ -25,7 +24,9 @@ pub use hooks::{HookRegistry, ToolHooks};
 pub use message::{Content, Message, Role};
 pub use openrouter::OpenRouterProvider;
 pub use plan::{Plan, TodoItem, TodoStatus};
-pub use project::load_project_instructions;
+pub use project::{
+    get_project_instructions_or_error, load_project_instructions, ProjectInstructionResult,
+};
 pub use provider::{Provider, ProviderResponse, ScriptedProvider};
 pub use runtime::RuntimeOptions;
 pub use session::Session;
