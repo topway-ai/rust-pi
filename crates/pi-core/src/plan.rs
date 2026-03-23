@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
 pub enum TodoStatus {
+    #[serde(rename = "pending")]
     Pending,
-    #[serde(alias = "in_progress", alias = "inprogress")]
+    #[serde(alias = "inprogress")]
+    #[serde(rename = "in_progress")]
     InProgress,
+    #[serde(rename = "done")]
     Done,
 }
 
@@ -74,6 +76,10 @@ impl Plan {
         self.items.is_empty()
     }
 
+    pub fn has_items(&self) -> bool {
+        !self.items.is_empty()
+    }
+
     pub fn set_items(&mut self, items: Vec<TodoItem>) {
         self.items = items;
         self.next_id = self.items.len();
@@ -97,6 +103,40 @@ impl Plan {
         }
         result
     }
+}
+
+pub fn should_use_plan(instruction: &str) -> bool {
+    let lower = instruction.to_lowercase();
+    if lower.contains(" and then ")
+        || lower.contains(" then ")
+        || lower.contains(" followed by ")
+        || lower.contains(" after that")
+    {
+        return true;
+    }
+    let action_words = [
+        "refactor",
+        "review",
+        "implement",
+        "create",
+        "build",
+        "set up",
+        "modify",
+        "fix",
+        "remove",
+        "add",
+        "verify",
+    ];
+    let action_count: usize = action_words.iter().filter(|w| lower.contains(*w)).count();
+    if action_count >= 2 {
+        return true;
+    }
+    let query_starters = ["what is", "where is", "how do", "show me", "list ", "find "];
+    let is_query = query_starters.iter().any(|q| lower.starts_with(q));
+    if is_query && action_count == 0 {
+        return false;
+    }
+    action_count > 0 || lower.contains("step")
 }
 
 #[cfg(test)]
@@ -175,5 +215,122 @@ mod tests {
     fn test_plan_format_empty() {
         let plan = Plan::new();
         assert_eq!(plan.format_for_display(), "(no plan)");
+    }
+
+    #[test]
+    fn test_todo_status_deserializes_inprogress_alias() {
+        let json = r#""inprogress""#;
+        let status: TodoStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status, TodoStatus::InProgress);
+    }
+
+    #[test]
+    fn test_todo_status_deserializes_canonical_in_progress() {
+        let json = r#""in_progress""#;
+        let status: TodoStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status, TodoStatus::InProgress);
+    }
+
+    #[test]
+    fn test_todo_status_always_serializes_to_canonical() {
+        let status = TodoStatus::InProgress;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"in_progress\"");
+    }
+
+    #[test]
+    fn test_format_for_display_uses_symbols_not_strings() {
+        let mut plan = Plan::new();
+        plan.add_item("Task 1".to_string());
+        let id2 = plan.add_item("Task 2".to_string());
+        plan.mark_in_progress(id2);
+        let id3 = plan.add_item("Task 3".to_string());
+        plan.mark_done(id3);
+
+        let display = plan.format_for_display();
+        assert!(!display.contains("in_progress"));
+        assert!(!display.contains("inprogress"));
+        assert!(display.contains("[>]"));
+        assert!(display.contains("[x]"));
+        assert!(display.contains("[ ]"));
+    }
+
+    #[test]
+    fn test_plan_replace_removes_old_items() {
+        let mut plan = Plan::new();
+        plan.add_item("Old task 1".to_string());
+        plan.add_item("Old task 2".to_string());
+
+        let new_items = vec![TodoItem {
+            id: 0,
+            description: "New task 1".to_string(),
+            status: TodoStatus::Pending,
+        }];
+        plan.clear();
+        plan.set_items(new_items);
+
+        assert_eq!(plan.items().len(), 1);
+        assert_eq!(plan.items()[0].description, "New task 1");
+    }
+
+    #[test]
+    fn test_plan_clear_resets_next_id() {
+        let mut plan = Plan::new();
+        plan.add_item("Task 1".to_string());
+        plan.add_item("Task 2".to_string());
+        plan.add_item("Task 3".to_string());
+        assert_eq!(plan.next_id, 3);
+
+        plan.clear();
+        assert_eq!(plan.next_id, 0);
+
+        let id = plan.add_item("New task".to_string());
+        assert_eq!(id, 0, "new items should start from id 0 after clear");
+    }
+
+    #[test]
+    fn test_empty_plan_format_returns_no_plan_indicator() {
+        let plan = Plan::new();
+        let display = plan.format_for_display();
+        assert_eq!(display, "(no plan)");
+    }
+
+    #[test]
+    fn test_plan_after_clear_is_empty() {
+        let mut plan = Plan::new();
+        plan.add_item("Task".to_string());
+        assert!(!plan.is_empty());
+
+        plan.clear();
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn test_should_use_plan_multistep() {
+        assert!(should_use_plan("create a file and then update it"));
+        assert!(should_use_plan("first do X, then do Y"));
+        assert!(should_use_plan("implement feature with multiple steps"));
+    }
+
+    #[test]
+    fn test_should_use_plan_complex_tasks() {
+        assert!(should_use_plan(
+            "refactor the codebase and verify tests pass"
+        ));
+        assert!(should_use_plan("review the code and make improvements"));
+        assert!(should_use_plan("build the project, run tests, then deploy"));
+    }
+
+    #[test]
+    fn test_should_skip_plan_simple_queries() {
+        assert!(!should_use_plan("what is the meaning of life"));
+        assert!(!should_use_plan("show me the files"));
+        assert!(!should_use_plan("list all functions"));
+    }
+
+    #[test]
+    fn test_should_skip_plan_trivial_tasks() {
+        assert!(!should_use_plan("read this file"));
+        assert!(!should_use_plan("find the error"));
     }
 }

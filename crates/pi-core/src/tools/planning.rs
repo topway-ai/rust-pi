@@ -66,18 +66,18 @@ impl crate::tools::Tool for UpdatePlanTool {
         }
     }
 
-    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
-        let args: UpdatePlanArgs =
-            serde_json::from_value(args).map_err(|e| Error::InvalidInput(e.to_string()))?;
+    fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<String> {
+        let args: UpdatePlanArgs = serde_json::from_value(args)
+            .map_err(|e| Error::InvalidInput(format!("update_plan: invalid input: {}", e)))?;
 
         let plan = self
             .agent_plan
             .as_ref()
-            .ok_or_else(|| Error::ToolFailed("update_plan: no plan bound".to_string()))?;
+            .ok_or_else(|| Error::ToolFailed("update_plan: plan not initialized".to_string()))?;
 
-        let mut plan_guard = plan
-            .lock()
-            .map_err(|e| Error::ToolFailed(format!("update_plan: lock failed: {}", e)))?;
+        let mut plan_guard = plan.lock().map_err(|e| {
+            Error::ToolFailed(format!("update_plan: cannot acquire plan lock: {}", e))
+        })?;
 
         let items: Vec<TodoItem> = args
             .items
@@ -165,12 +165,50 @@ mod tests {
 
         let args = serde_json::json!({
             "items": [
-                {"content": "Task with inprogress alias", "status": "inprogress"}
+                {"content": "Active task", "status": "inprogress"}
             ]
         });
 
         let result = tool.execute(args, &ctx);
         assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            !output.contains("inprogress"),
+            "output should not contain old alias, got: {}",
+            output
+        );
+        assert!(
+            output.contains("[>]"),
+            "inprogress should normalize to in_progress symbol"
+        );
+    }
+
+    #[test]
+    fn test_update_plan_canonical_in_progress_used_in_output() {
+        let plan = Arc::new(std::sync::Mutex::new(Plan::new()));
+        let tool = UpdatePlanTool::with_plan(plan.clone());
+
+        let exec = crate::context::ExecutionContext::new(std::path::PathBuf::from("/tmp"));
+        let runtime = crate::runtime::RuntimeOptions::default();
+        let ctx = crate::context::ToolContext::new(&exec, &runtime);
+
+        let args = serde_json::json!({
+            "items": [
+                {"content": "Canonical task", "status": "in_progress"}
+            ]
+        });
+
+        let result = tool.execute(args, &ctx);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            !output.contains("in_progress"),
+            "output should use symbols, not string"
+        );
+        assert!(
+            output.contains("[>]"),
+            "canonical in_progress should render as symbol"
+        );
     }
 
     #[test]
@@ -215,5 +253,97 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("invalid") || err.to_string().contains("InvalidInput"));
+    }
+
+    #[test]
+    fn test_update_plan_replace_removes_stale_items() {
+        let plan = Arc::new(std::sync::Mutex::new(Plan::new()));
+        plan.lock().unwrap().add_item("Old task 1".to_string());
+        plan.lock().unwrap().add_item("Old task 2".to_string());
+        assert_eq!(plan.lock().unwrap().items().len(), 2);
+
+        let tool = UpdatePlanTool::with_plan(plan.clone());
+        let exec = crate::context::ExecutionContext::new(std::path::PathBuf::from("/tmp"));
+        let runtime = crate::runtime::RuntimeOptions::default();
+        let ctx = crate::context::ToolContext::new(&exec, &runtime);
+
+        let args = serde_json::json!({
+            "items": [
+                {"content": "New task", "status": "pending"}
+            ]
+        });
+
+        let result = tool.execute(args, &ctx);
+        assert!(result.is_ok());
+
+        let plan_guard = plan.lock().unwrap();
+        assert_eq!(plan_guard.items().len(), 1);
+        assert_eq!(plan_guard.items()[0].description, "New task");
+    }
+
+    #[test]
+    fn test_update_plan_empty_items_clears_plan() {
+        let plan = Arc::new(std::sync::Mutex::new(Plan::new()));
+        plan.lock().unwrap().add_item("Task to clear".to_string());
+        assert!(!plan.lock().unwrap().is_empty());
+
+        let tool = UpdatePlanTool::with_plan(plan.clone());
+        let exec = crate::context::ExecutionContext::new(std::path::PathBuf::from("/tmp"));
+        let runtime = crate::runtime::RuntimeOptions::default();
+        let ctx = crate::context::ToolContext::new(&exec, &runtime);
+
+        let args = serde_json::json!({ "items": [] });
+        let result = tool.execute(args, &ctx);
+
+        assert!(result.is_ok());
+        assert!(plan.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_update_plan_rejects_missing_content_field() {
+        let plan = Arc::new(std::sync::Mutex::new(Plan::new()));
+        let tool = UpdatePlanTool::with_plan(plan.clone());
+
+        let exec = crate::context::ExecutionContext::new(std::path::PathBuf::from("/tmp"));
+        let runtime = crate::runtime::RuntimeOptions::default();
+        let ctx = crate::context::ToolContext::new(&exec, &runtime);
+
+        let args = serde_json::json!({
+            "items": [
+                {"status": "pending"}
+            ]
+        });
+
+        let result = tool.execute(args, &ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("update_plan"),
+            "error should mention tool name"
+        );
+    }
+
+    #[test]
+    fn test_update_plan_rejects_missing_status_field() {
+        let plan = Arc::new(std::sync::Mutex::new(Plan::new()));
+        let tool = UpdatePlanTool::with_plan(plan.clone());
+
+        let exec = crate::context::ExecutionContext::new(std::path::PathBuf::from("/tmp"));
+        let runtime = crate::runtime::RuntimeOptions::default();
+        let ctx = crate::context::ToolContext::new(&exec, &runtime);
+
+        let args = serde_json::json!({
+            "items": [
+                {"content": "task without status"}
+            ]
+        });
+
+        let result = tool.execute(args, &ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("update_plan"),
+            "error should mention tool name"
+        );
     }
 }
