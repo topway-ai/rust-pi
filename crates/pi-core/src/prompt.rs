@@ -1,9 +1,33 @@
 use crate::tool_spec::ToolSpec;
 
+pub const PROJECT_INSTRUCTIONS_SECTION: &str = "## Project Instructions\n\
+\
+When a PI.md file exists in the workspace root, it contains project-specific guidance that you must follow.\n\
+Always check for PI.md at the start of a session and respect its instructions.\n";
+
+pub const PLANNING_SECTION: &str = "## Planning\n\
+\
+For non-trivial coding tasks, create and maintain an explicit plan:\n\
+- Use the plan system to track multi-step work\n\
+- Break down complex tasks into clear, ordered steps\n\
+- Update plan item statuses as you complete them\n\
+- Keep the plan visible in your reasoning throughout the session\n";
+
+pub const GIT_CONTEXT_SECTION: &str = "## Git Context\n\
+\
+You have access to git tools for repository awareness:\n\
+- git_status: Check for uncommitted changes before making edits\n\
+- git_branch: Know your current branch before creating commits or switching context\n\
+- git_diff: Review changes before committing or submitting\n\
+Use git tools to stay aware of repository state, especially before write operations.\n";
+
 pub fn build_system_prompt(tools: &[ToolSpec]) -> String {
     let mut prompt = String::from(
         "You are a coding assistant that operates within a workspace directory. All file paths are relative to this workspace root.\n\n",
     );
+    prompt.push_str(PROJECT_INSTRUCTIONS_SECTION);
+    prompt.push_str(PLANNING_SECTION);
+    prompt.push_str(GIT_CONTEXT_SECTION);
     prompt.push_str("Available tools:\n\n");
     for tool in tools {
         prompt.push_str(&format!("- {}: {}\n", tool.name, tool.description));

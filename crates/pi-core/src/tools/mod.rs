@@ -1,10 +1,12 @@
 mod bash;
 mod edit;
+mod git;
 mod read;
 mod write;
 
 pub use bash::BashTool;
 pub use edit::EditTool;
+pub use git::{GitBranchTool, GitDiffTool, GitStatusTool};
 pub use read::ReadTool;
 pub use write::WriteTool;
 
@@ -75,5 +77,8 @@ pub fn default_tools() -> ToolRegistry {
     registry.add(Box::new(WriteTool::new()));
     registry.add(Box::new(EditTool::new()));
     registry.add(Box::new(BashTool::new()));
+    registry.add(Box::new(GitStatusTool::new()));
+    registry.add(Box::new(GitDiffTool::new()));
+    registry.add(Box::new(GitBranchTool::new()));
     registry
 }

@@ -289,9 +289,20 @@ mod tests {
         let request = provider.build_request(&messages);
 
         let tools = request.tools.unwrap();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 7);
         let names: Vec<_> = tools.iter().map(|t| t.function.name.as_str()).collect();
-        assert_eq!(names, vec!["read", "write", "edit", "bash"]);
+        assert_eq!(
+            names,
+            vec![
+                "read",
+                "write",
+                "edit",
+                "bash",
+                "git_status",
+                "git_diff",
+                "git_branch"
+            ]
+        );
     }
 
     #[test]

@@ -1,16 +1,17 @@
 #[derive(Debug, Clone)]
 pub struct ToolSpec {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
     pub input_schema: serde_json::Value,
 }
 
 impl ToolSpec {
     pub fn read() -> Self {
         Self {
-            name: "read",
+            name: "read".to_string(),
             description:
-                "read text file contents (max 64KB, truncated if larger; binary files rejected)",
+                "read text file contents (max 64KB, truncated if larger; binary files rejected)"
+                    .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -23,8 +24,8 @@ impl ToolSpec {
 
     pub fn write() -> Self {
         Self {
-            name: "write",
-            description: "write file contents",
+            name: "write".to_string(),
+            description: "write file contents".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -38,8 +39,8 @@ impl ToolSpec {
 
     pub fn edit() -> Self {
         Self {
-            name: "edit",
-            description: "replace exact text in a file; fails if target text is absent or ambiguous (unless replace_all is true)",
+            name: "edit".to_string(),
+            description: "replace exact text in a file; fails if target is absent or ambiguous (unless replace_all is true)".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -55,8 +56,8 @@ impl ToolSpec {
 
     pub fn bash() -> Self {
         Self {
-            name: "bash",
-            description: "execute bash command locally in workspace (trusted local execution; output truncated at 64KB per stream)",
+            name: "bash".to_string(),
+            description: "execute bash command locally in workspace (trusted local execution; output truncated at 64KB per stream)".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
