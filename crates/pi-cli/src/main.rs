@@ -50,7 +50,10 @@ fn main() -> Result<()> {
         .with_max_provider_retries(args.max_retries.unwrap_or(3))
         .with_provider_timeout_secs(args.timeout_secs.unwrap_or(120));
 
-    let provider: Box<dyn Provider> = if let Some(api_key) = args.api_key {
+    let api_key = args
+        .api_key
+        .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+    let provider: Box<dyn Provider> = if let Some(api_key) = api_key {
         Box::new(OpenRouterProvider::with_timeout(
             api_key,
             args.model,

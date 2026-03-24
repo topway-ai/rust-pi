@@ -1,6 +1,6 @@
 # rust-pi
 
-A minimal coding agent that runs locally in your workspace. It uses an LLM via OpenRouter to execute file operations, shell commands, and git actions within your project.
+A minimal coding agent that runs locally in your workspace. It uses an LLM via OpenRouter to execute file operations, shell commands, and git actions.
 
 ## Current Status
 
@@ -18,22 +18,20 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 ```
 
-## Clone and Build
-
-```bash
-git clone https://github.com/topway-ai/rust-pi.git
-cd rust-pi
-cargo build --release
-```
-
-The binary is at `target/release/pi`.
-
 ## Quick Start
 
-Run one command to test OpenRouter. Replace YOUR_API_KEY with your actual OpenRouter key:
-
 ```bash
-./target/release/pi --api-key YOUR_API_KEY --cwd /path/to/your/project "summarize this project"
+# Clone and install
+git clone https://github.com/topway-ai/rust-pi.git
+cd rust-pi
+cargo install --path crates/pi-cli
+
+# Set your API key (do this once per shell session)
+export OPENROUTER_API_KEY=your_key_here
+
+# Run from your project directory
+cd /path/to/your/project
+pi "summarize this project"
 ```
 
 The agent uses MiniMax M2.7 by default.
@@ -42,13 +40,23 @@ The agent uses MiniMax M2.7 by default.
 
 ```bash
 # Inspect a project
-./target/release/pi --api-key YOUR_API_KEY --cwd /path/to/project "give me a summary"
+pi "give me a summary"
 
 # Check git status
-./target/release/pi --api-key YOUR_API_KEY --cwd /path/to/project "show git status"
+pi "show git status"
 
 # Make a small edit
-./target/release/pi --api-key YOUR_API_KEY --cwd /path/to/project "add a TODO comment to src/main.rs"
+pi "add a TODO comment to src/main.rs"
+```
+
+## Alternative: Run Without Installing
+
+If you don't want to install, run the binary directly:
+
+```bash
+cargo build --release
+cd /path/to/your/project
+/path/to/rust-pi/target/release/pi --api-key YOUR_KEY "summarize this project"
 ```
 
 ## Optional: Workspace Files
@@ -73,10 +81,10 @@ The agent uses MiniMax M2.7 by default.
 ## CLI Options
 
 ```bash
-./target/release/pi --help
+pi --help
 
 Options:
-  --api-key KEY      OpenRouter API key
+  --api-key KEY      OpenRouter API key (or set OPENROUTER_API_KEY env var)
   --model MODEL      Model to use (default: minimax/minimax-m2.7)
   --cwd DIR          Working directory
   --max-steps N      Max steps (default: 50)
