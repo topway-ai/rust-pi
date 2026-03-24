@@ -13,7 +13,15 @@ pub enum ProviderResponse {
         name: String,
         args: serde_json::Value,
     },
+    ToolCalls(Vec<ToolCallEntry>),
     RequiresInput,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCallEntry {
+    pub id: String,
+    pub name: String,
+    pub args: serde_json::Value,
 }
 
 pub struct ScriptedProvider {

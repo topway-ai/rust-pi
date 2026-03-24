@@ -3,6 +3,8 @@ mod edit;
 mod git;
 mod planning;
 mod read;
+mod save_lesson;
+mod save_plan;
 mod write;
 
 pub use bash::BashTool;
@@ -10,6 +12,8 @@ pub use edit::EditTool;
 pub use git::{GitAddTool, GitBranchTool, GitCommitTool, GitDiffTool, GitStatusTool};
 pub use planning::UpdatePlanTool;
 pub use read::ReadTool;
+pub use save_lesson::SaveLessonTool;
+pub use save_plan::SavePlanTool;
 pub use write::WriteTool;
 
 use crate::context::ToolContext;

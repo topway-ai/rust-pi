@@ -27,7 +27,7 @@ pub use plan::{Plan, TodoItem, TodoStatus};
 pub use project::{
     get_project_instructions_or_error, load_project_instructions, ProjectInstructionResult,
 };
-pub use provider::{Provider, ProviderResponse, ScriptedProvider};
+pub use provider::{Provider, ProviderResponse, ScriptedProvider, ToolCallEntry};
 pub use runtime::RuntimeOptions;
 pub use session::Session;
 pub use tool_spec::ToolSpec;

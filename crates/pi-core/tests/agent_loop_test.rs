@@ -2,6 +2,7 @@ use pi_core::{
     context::ExecutionContext,
     tools::{BashTool, EditTool, ReadTool, Tool, WriteTool},
     Agent, Content, Error, Message, Provider, ProviderResponse, Role, RuntimeOptions,
+    ToolCallEntry,
 };
 use std::sync::{Arc, RwLock};
 use tempfile::TempDir;
@@ -416,4 +417,104 @@ fn test_agent_commands_json_invalid_fails() {
     let result = agent.run(&ctx, "test");
 
     assert!(result.is_err());
+}
+
+#[test]
+fn test_agent_multiple_tool_calls_execute_sequentially() {
+    let (ctx, _temp) = make_test_context();
+    std::fs::write(ctx.resolve_path("a.txt").unwrap(), "content A").unwrap();
+    std::fs::write(ctx.resolve_path("b.txt").unwrap(), "content B").unwrap();
+
+    let responses = vec![
+        ProviderResponse::ToolCalls(vec![
+            ToolCallEntry {
+                id: "call_1".into(),
+                name: "read".into(),
+                args: serde_json::json!({"path": "a.txt"}),
+            },
+            ToolCallEntry {
+                id: "call_2".into(),
+                name: "read".into(),
+                args: serde_json::json!({"path": "b.txt"}),
+            },
+        ]),
+        ProviderResponse::Message(Message::assistant("done")),
+    ];
+    let provider = pi_core::ScriptedProvider::new(responses);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+
+    let result = agent.run(&ctx, "read two files");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_agent_second_tool_failure_stops_batch() {
+    let (ctx, _temp) = make_test_context();
+    std::fs::write(ctx.resolve_path("a.txt").unwrap(), "content A").unwrap();
+
+    struct SecondFailureProvider;
+    impl Provider for SecondFailureProvider {
+        fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+            Ok(ProviderResponse::ToolCalls(vec![
+                ToolCallEntry {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    args: serde_json::json!({"path": "a.txt"}),
+                },
+                ToolCallEntry {
+                    id: "call_2".into(),
+                    name: "nonexistent_tool".into(),
+                    args: serde_json::json!({"foo": "bar"}),
+                },
+            ]))
+        }
+    }
+
+    let provider = SecondFailureProvider;
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+
+    let result = agent.run(&ctx, "call two tools");
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("unknown tool") || err.contains("not found"),
+        "expected tool not found error: {}",
+        err
+    );
+}
+
+#[test]
+fn test_agent_multi_tool_batch_counts_steps() {
+    let (ctx, _temp) = make_test_context();
+
+    struct MultiToolProvider;
+    impl Provider for MultiToolProvider {
+        fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+            Ok(ProviderResponse::ToolCalls(vec![
+                ToolCallEntry {
+                    id: "1".into(),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command": "echo a"}),
+                },
+                ToolCallEntry {
+                    id: "2".into(),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command": "echo b"}),
+                },
+            ]))
+        }
+    }
+
+    let options = RuntimeOptions::default().with_max_steps(1);
+    let provider = MultiToolProvider;
+    let mut agent = Agent::with_options(Box::new(provider), make_tools(), options);
+
+    let result = agent.run(&ctx, "run two bash commands");
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("max steps"),
+        "expected max steps error: {}",
+        err
+    );
 }

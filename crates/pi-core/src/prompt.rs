@@ -6,11 +6,10 @@ When a PI.md file exists in the workspace root, it contains project-specific gui
 Always check for PI.md at the start of a session and respect its instructions.\n";
 
 pub const PLANNING_SECTION: &str = "## Planning\n\
-\nFor non-trivial multi-step tasks, use update_plan to create a plan:\n\
-- update_plan with items: [{content, status: \"pending\"|\"in_progress\"|\"done\"}]\n\
-- Skip planning for simple one-step tasks\n\
-- Update plan item statuses as you complete each step\n\
-- When all items are done, the plan can be cleared or left as record\n";
+\nFor non-trivial multi-step tasks, follow Research → Plan → Build:\n\
+1. Research: inspect relevant files, git context, project instructions first\n\
+2. Plan: use update_plan to create a plan with steps\n\
+3. Build: execute plan items, updating status as you complete each step\n\nFor simple one-step tasks, skip planning and act directly.\n\nUseful tools:\n- update_plan: create/replace plan with items [{content, status}]\n- save_plan: archive current plan to .rust-pi/plans/ for reuse\n- save_lesson: save a lesson note to .rust-pi/lessons/ when worth recording\n\nPlans can be saved when they represent a useful reusable approach.\nLessons should be saved sparingly - only for genuinely useful insights.\n";
 
 pub const GIT_CONTEXT_SECTION: &str = "## Git Context\n\
 \

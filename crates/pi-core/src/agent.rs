@@ -6,7 +6,7 @@ use crate::project::get_project_instructions_or_error;
 use crate::prompt;
 use crate::runtime::RuntimeOptions;
 use crate::session::Session;
-use crate::tools::{Tool, ToolRegistry, UpdatePlanTool};
+use crate::tools::{SaveLessonTool, SavePlanTool, Tool, ToolRegistry, UpdatePlanTool};
 use crate::{Error, Message, Provider, ProviderResponse, Result};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -39,6 +39,11 @@ impl Agent {
         let plan = Arc::new(Mutex::new(Plan::new()));
         let planning_tool = UpdatePlanTool::with_plan(plan.clone());
         registry.add(Box::new(planning_tool));
+
+        let save_plan_tool = SavePlanTool::with_plan(plan.clone());
+        registry.add(Box::new(save_plan_tool));
+
+        registry.add(Box::new(SaveLessonTool::new()));
 
         Self {
             session: Session::new(),
@@ -276,6 +281,127 @@ impl Agent {
                     self.session.add_message(Message::tool_result(id, result));
                     empty_response_retries = 0;
 
+                    if self.session.message_count() > self.options.max_messages_before_truncation {
+                        let keep_recent = self.options.max_messages_before_truncation / 2;
+                        self.session.truncate_history(keep_recent);
+                    }
+                }
+                ProviderResponse::ToolCalls(calls) => {
+                    for call in calls {
+                        let id = call.id;
+                        let name = call.name;
+                        let args = call.args;
+                        let is_external = self.external_tools.get(&name).is_some();
+                        let tool = match self.tools.get(&name) {
+                            Some(t) => t,
+                            None if is_external => {
+                                let external_tool = self.external_tools.get(&name).unwrap();
+                                if let Some(hooks) = self.hooks.get(&name) {
+                                    if !hooks.run_pre_hooks(&name, &args, &tool_ctx) {
+                                        self.session.add_message(Message::tool_request(
+                                            id.clone(),
+                                            name.clone(),
+                                            args,
+                                        ));
+                                        self.session.add_message(Message::tool_result(
+                                            id,
+                                            format!(
+                                                "error: external tool '{}' blocked by pre-hook",
+                                                name
+                                            ),
+                                        ));
+                                        return Err(Error::ToolFailed(format!(
+                                            "external tool '{}' blocked by pre-hook",
+                                            name
+                                        )));
+                                    }
+                                }
+                                let result = external_tool.execute(&args, &tool_ctx);
+                                self.session.add_message(Message::tool_request(
+                                    id.clone(),
+                                    name.clone(),
+                                    args,
+                                ));
+                                let result_str = match result {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        self.session.add_message(Message::tool_result(
+                                            id,
+                                            format!("error: external tool execution failed: {}", e),
+                                        ));
+                                        return Err(Error::ToolFailed(format!(
+                                            "external tool '{}' execution failed: {}",
+                                            name, e
+                                        )));
+                                    }
+                                };
+                                self.session
+                                    .add_message(Message::tool_result(id, result_str));
+                                continue;
+                            }
+                            None => {
+                                self.session.add_message(Message::tool_request(
+                                    id.clone(),
+                                    name.clone(),
+                                    args,
+                                ));
+                                self.session.add_message(Message::tool_result(
+                                    id,
+                                    format!("error: unknown tool '{}'", name),
+                                ));
+                                return Err(Error::ToolNotFound(format!(
+                                    "unknown tool '{}'",
+                                    name
+                                )));
+                            }
+                        };
+
+                        if let Some(hooks) = self.hooks.get(&name) {
+                            if !hooks.run_pre_hooks(&name, &args, &tool_ctx) {
+                                self.session.add_message(Message::tool_request(
+                                    id.clone(),
+                                    name.clone(),
+                                    args,
+                                ));
+                                self.session.add_message(Message::tool_result(
+                                    id,
+                                    format!("error: tool '{}' blocked by pre-hook", name),
+                                ));
+                                return Err(Error::ToolFailed(format!(
+                                    "tool '{}' blocked by pre-hook",
+                                    name
+                                )));
+                            }
+                        }
+
+                        let mut result = match tool.execute(args.clone(), &tool_ctx) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                self.session.add_message(Message::tool_request(
+                                    id.clone(),
+                                    name.clone(),
+                                    args,
+                                ));
+                                self.session.add_message(Message::tool_result(
+                                    id,
+                                    format!("error: tool execution failed: {}", e),
+                                ));
+                                return Err(Error::ToolFailed(format!(
+                                    "tool execution failed: {}",
+                                    e
+                                )));
+                            }
+                        };
+
+                        if let Some(hooks) = self.hooks.get(&name) {
+                            result = hooks.run_post_hooks(&name, &args, &result, &tool_ctx);
+                        }
+
+                        self.session
+                            .add_message(Message::tool_request(id.clone(), name, args));
+                        self.session.add_message(Message::tool_result(id, result));
+                    }
+                    empty_response_retries = 0;
                     if self.session.message_count() > self.options.max_messages_before_truncation {
                         let keep_recent = self.options.max_messages_before_truncation / 2;
                         self.session.truncate_history(keep_recent);

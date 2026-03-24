@@ -99,5 +99,5 @@ This agent can read/write/edit files, run shell commands, and execute git operat
 ## Uninstall
 
 ```bash
-cargo uninstall pi
+cargo uninstall pi-cli
 ```

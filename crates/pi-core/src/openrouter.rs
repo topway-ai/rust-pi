@@ -1,5 +1,5 @@
 use crate::tool_spec::ToolSpec;
-use crate::{Content, Error, Message, Provider, ProviderResponse, Result, Role};
+use crate::{Content, Error, Message, Provider, ProviderResponse, Result, Role, ToolCallEntry};
 use serde::{Deserialize, Serialize};
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -124,13 +124,8 @@ impl OpenRouterProvider {
 
         if let Some(tool_calls) = message.tool_calls {
             let count = tool_calls.len();
-            if count > 1 {
-                return Err(Error::ProviderUnsupported(format!(
-                    "provider returned {} tool calls, but only one per turn is supported",
-                    count
-                )));
-            }
-            if let Some(tool_call) = tool_calls.into_iter().next() {
+            if count == 1 {
+                let tool_call = tool_calls.into_iter().next().unwrap();
                 let id = tool_call.id;
                 let function = tool_call.function;
                 let name = function.name;
@@ -139,6 +134,20 @@ impl OpenRouterProvider {
                         Error::ProviderParseFailed(format!("failed to parse tool args: {}", e))
                     })?;
                 return Ok(ProviderResponse::ToolCall { id, name, args });
+            }
+            if count > 1 {
+                let mut entries = Vec::with_capacity(count);
+                for tool_call in tool_calls {
+                    let id = tool_call.id;
+                    let function = tool_call.function;
+                    let name = function.name;
+                    let args: serde_json::Value = serde_json::from_str(&function.arguments)
+                        .map_err(|e| {
+                            Error::ProviderParseFailed(format!("failed to parse tool args: {}", e))
+                        })?;
+                    entries.push(ToolCallEntry { id, name, args });
+                }
+                return Ok(ProviderResponse::ToolCalls(entries));
             }
         }
 
@@ -377,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_multiple_tool_calls_returns_error() {
+    fn test_parse_multiple_tool_calls_returns_success() {
         let provider = OpenRouterProvider::new("key", "model");
         let response = OpenAIResponse {
             choices: vec![Choice {
@@ -403,13 +412,19 @@ mod tests {
             }],
         };
         let result = provider.parse_response(response);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("only one per turn"),
-            "expected single tool call error: {}",
-            err
-        );
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ProviderResponse::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].id, "call_1");
+                assert_eq!(calls[0].name, "read");
+                assert_eq!(calls[0].args["path"], "a.txt");
+                assert_eq!(calls[1].id, "call_2");
+                assert_eq!(calls[1].name, "read");
+                assert_eq!(calls[1].args["path"], "b.txt");
+            }
+            _ => panic!("expected ToolCalls"),
+        }
     }
 
     #[test]

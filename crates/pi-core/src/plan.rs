@@ -186,6 +186,10 @@ fn is_trivial_query(lower: &str) -> bool {
 }
 
 pub fn should_use_plan(instruction: &str) -> bool {
+    should_require_research_plan_build(instruction)
+}
+
+pub fn should_require_research_plan_build(instruction: &str) -> bool {
     let lower = &instruction.to_lowercase();
     if has_explicit_sequence(lower) {
         return true;
