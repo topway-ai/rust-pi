@@ -181,6 +181,151 @@ impl crate::tools::Tool for GitBranchTool {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitAddArgs {
+    pub paths: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct GitAddTool;
+
+impl GitAddTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for GitAddTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::tools::Tool for GitAddTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "git_add".to_string(),
+            description: "stage files in git (add to index)".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "relative paths of files to stage"
+                    }
+                },
+                "required": ["paths"]
+            }),
+        }
+    }
+
+    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
+        let args: GitAddArgs =
+            serde_json::from_value(args).map_err(|e| Error::InvalidInput(e.to_string()))?;
+
+        if args.paths.is_empty() {
+            return Err(Error::InvalidInput(
+                "at least one path required".to_string(),
+            ));
+        }
+
+        let mut cmd = Command::new("git");
+        cmd.args(["add"]);
+
+        for path in &args.paths {
+            let full_path = ctx.exec.resolve_path(path)?;
+            cmd.arg(full_path);
+        }
+
+        cmd.current_dir(&ctx.exec.workspace_root);
+
+        let output = cmd
+            .output()
+            .map_err(|e| Error::ToolFailed(format!("failed to execute git add: {}", e)))?;
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if !output.status.success() {
+            return Err(Error::ToolFailed(format!("git add failed: {}", stderr)));
+        }
+
+        Ok(format!("staged {} file(s)", args.paths.len()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitArgs {
+    pub message: String,
+}
+
+#[derive(Clone)]
+pub struct GitCommitTool;
+
+impl GitCommitTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for GitCommitTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::tools::Tool for GitCommitTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "git_commit".to_string(),
+            description: "commit staged changes in git with a message".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "commit message"
+                    }
+                },
+                "required": ["message"]
+            }),
+        }
+    }
+
+    fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
+        let args: GitCommitArgs =
+            serde_json::from_value(args).map_err(|e| Error::InvalidInput(e.to_string()))?;
+
+        if args.message.trim().is_empty() {
+            return Err(Error::InvalidInput(
+                "commit message cannot be empty".to_string(),
+            ));
+        }
+
+        let output = Command::new("git")
+            .args(["commit", "-m", &args.message])
+            .current_dir(&ctx.exec.workspace_root)
+            .output()
+            .map_err(|e| Error::ToolFailed(format!("failed to execute git commit: {}", e)))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if !output.status.success() {
+            return Err(Error::ToolFailed(format!(
+                "git commit failed: {}",
+                if stderr.is_empty() { stdout } else { stderr }
+            )));
+        }
+
+        if stdout.is_empty() {
+            Ok("committed successfully".to_string())
+        } else {
+            Ok(stdout.to_string())
+        }
+    }
+}
+
 fn truncate_git_output(output: &str, max_size: usize) -> String {
     if output.len() <= max_size {
         return output.to_string();
@@ -270,6 +415,104 @@ mod tests {
 
         let tool = GitStatusTool::new();
         let result = tool.execute(serde_json::json!({}), &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_git_add_stages_file() {
+        let temp = TempDir::new().unwrap();
+        let exec = ExecutionContext::new(temp.path().to_path_buf());
+        let runtime = RuntimeOptions::default();
+        let ctx = ToolContext::new(&exec, &runtime);
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
+
+        let tool = GitAddTool::new();
+        let result = tool.execute(serde_json::json!({"paths": ["test.txt"]}), &ctx);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("staged"));
+    }
+
+    #[test]
+    fn test_git_add_empty_paths_fails() {
+        let temp = TempDir::new().unwrap();
+        let exec = ExecutionContext::new(temp.path().to_path_buf());
+        let runtime = RuntimeOptions::default();
+        let ctx = ToolContext::new(&exec, &runtime);
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let tool = GitAddTool::new();
+        let result = tool.execute(serde_json::json!({"paths": []}), &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_git_commit_commits_staged() {
+        let temp = TempDir::new().unwrap();
+        let exec = ExecutionContext::new(temp.path().to_path_buf());
+        let runtime = RuntimeOptions::default();
+        let ctx = ToolContext::new(&exec, &runtime);
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
+
+        Command::new("git")
+            .args(["add", "test.txt"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let tool = GitCommitTool::new();
+        let result = tool.execute(serde_json::json!({"message": "initial commit"}), &ctx);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("committed") || output.contains("initial commit"));
+    }
+
+    #[test]
+    fn test_git_commit_empty_message_fails() {
+        let temp = TempDir::new().unwrap();
+        let exec = ExecutionContext::new(temp.path().to_path_buf());
+        let runtime = RuntimeOptions::default();
+        let ctx = ToolContext::new(&exec, &runtime);
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let tool = GitCommitTool::new();
+        let result = tool.execute(serde_json::json!({"message": ""}), &ctx);
         assert!(result.is_err());
     }
 }
