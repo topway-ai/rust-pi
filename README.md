@@ -95,3 +95,9 @@ Options:
 ## Safety
 
 This agent can read/write/edit files, run shell commands, and execute git operations. Only run in directories you trust.
+
+## Uninstall
+
+```bash
+cargo uninstall pi
+```
