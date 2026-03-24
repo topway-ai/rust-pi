@@ -14,11 +14,7 @@ struct Cli {
     #[arg(long, help = "OpenRouter API key")]
     api_key: Option<String>,
 
-    #[arg(
-        long,
-        default_value = "openrouter/anthropic/claude-3.5-haiku",
-        help = "Model to use"
-    )]
+    #[arg(long, default_value = "minimax/minimax-m2.7", help = "Model to use")]
     model: String,
 
     #[arg(long, help = "Working directory for file operations")]
