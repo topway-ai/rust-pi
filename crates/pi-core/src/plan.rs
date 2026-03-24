@@ -125,15 +125,22 @@ fn has_explicit_plan_request(lower: &str) -> bool {
 }
 
 fn has_broad_scope(lower: &str) -> bool {
-    lower.contains("repo")
-        || lower.contains("repository")
-        || lower.contains("whole ")
-        || lower.contains("entire ")
-        || lower.contains("across ")
-        || lower.contains("throughout")
-        || lower.contains("all files")
-        || lower.contains("all the")
-        || lower.contains("project-wide")
+    let broad_phrases = [
+        "entire repo",
+        "entire repository",
+        "whole repo",
+        "whole repository",
+        "whole project",
+        "entire project",
+        "project-wide",
+        "across the repo",
+        "across the project",
+        "throughout the",
+        "throughout the repo",
+        "throughout the project",
+        "codebase",
+    ];
+    broad_phrases.iter().any(|p| lower.contains(p))
 }
 
 fn has_multiple_action_categories(lower: &str) -> bool {
@@ -382,7 +389,7 @@ mod tests {
     fn test_should_use_plan_broad_scope() {
         assert!(should_use_plan("refactor the entire repo"));
         assert!(should_use_plan("fix bugs across the project"));
-        assert!(should_use_plan("update all files in the project"));
+        assert!(should_use_plan("refactor the entire repository"));
     }
 
     #[test]
@@ -392,6 +399,8 @@ mod tests {
         ));
         assert!(should_use_plan("review and modify the code"));
         assert!(should_use_plan("add tests and verify the build"));
+        assert!(should_use_plan("fix one bug and verify tests"));
+        assert!(should_use_plan("refactor and test the code"));
     }
 
     #[test]
@@ -413,5 +422,21 @@ mod tests {
         assert!(!should_use_plan("fix the bug in main.rs"));
         assert!(!should_use_plan("add a new function"));
         assert!(!should_use_plan("modify this file"));
+    }
+
+    #[test]
+    fn test_should_skip_plan_narrow_broad_words() {
+        assert!(!should_use_plan("show me the whole file"));
+        assert!(!should_use_plan("update the entire function"));
+        assert!(!should_use_plan("search across this file"));
+        assert!(!should_use_plan("read the entire class"));
+        assert!(!should_use_plan("find across all lines in file"));
+    }
+
+    #[test]
+    fn test_should_use_plan_genuine_broad_scope() {
+        assert!(should_use_plan("refactor the whole project"));
+        assert!(should_use_plan("refactor the entire repository"));
+        assert!(should_use_plan("fix bugs across the codebase"));
     }
 }
