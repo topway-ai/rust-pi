@@ -1,15 +1,15 @@
 [package]
 edition = "2021"
 version = "0.1.0"
-name = "pi-cli"
-repository = "https://github.com/TopWayAI/rust-pi"
+name = "topagent-cli"
+repository = "https://github.com/TopWayAI/topagent"
 
 [[bin]]
-name = "pi"
+name = "topagent"
 path = "src/main.rs"
 
 [dependencies]
-pi-core = { path = "../pi-core" }
+topagent-core = { path = "../topagent-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"

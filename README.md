@@ -1,4 +1,4 @@
-# Rust PI - Local AI Coding Agent
+# Top Agent - Local AI Coding Agent
 
 A minimal coding agent that runs locally in your workspace. It uses an LLM via OpenRouter to execute file operations, shell commands, and git actions.
 
@@ -22,16 +22,16 @@ source ~/.cargo/env
 
 ```bash
 # Clone and install
-git clone https://github.com/topway-ai/rust-pi.git
-cd rust-pi
-cargo install --path crates/pi-cli
+git clone https://github.com/TopWayAI/topagent.git
+cd topagent
+cargo install --path crates/topagent-cli
 
 # Set your API key (do this once per shell session)
 export OPENROUTER_API_KEY=your_key_here
 
 # Run from your project directory
 cd /path/to/your/project
-pi "summarize this project"
+topagent "summarize this project"
 ```
 
 The agent uses MiniMax M2.7 by default.
@@ -40,13 +40,13 @@ The agent uses MiniMax M2.7 by default.
 
 ```bash
 # Inspect a project
-pi "give me a summary"
+topagent "give me a summary"
 
 # Check git status
-pi "show git status"
+topagent "show git status"
 
 # Make a small edit
-pi "add a TODO comment to src/main.rs"
+topagent "add a TODO comment to src/main.rs"
 ```
 
 ## Alternative: Run Without Installing
@@ -56,26 +56,18 @@ If you don't want to install, run the binary directly:
 ```bash
 cargo build --release
 cd /path/to/your/project
-/path/to/rust-pi/target/release/pi --api-key YOUR_KEY "summarize this project"
+/path/to/topagent/target/release/topagent --api-key YOUR_KEY "summarize this project"
 ```
 
 ## Optional: Workspace Files
 
-**PI.md** - Project instructions (optional, place in workspace root):
+**TOPAGENT.md** - Project instructions (optional, place in workspace root):
 
 ```markdown
 # Project Instructions
 
 - Use TypeScript, not JavaScript
 - Run tests before committing
-```
-
-**commands.json** - Custom commands (optional):
-
-```json
-[
-  {"name": "test", "description": "Run tests", "command": "cargo", "args_template": "test --all"}
-]
 ```
 
 ## Telegram Bot (Optional)
@@ -90,7 +82,7 @@ Run the agent as a Telegram bot with long polling.
 4. Make sure no webhook is active (BotFather will tell you if one is set)
 5. Run:
    ```bash
-   pi telegram serve --cwd /path/to/your/project
+   topagent telegram serve --cwd /path/to/your/project
    ```
 6. Open Telegram, find your bot, send a private text message
 
@@ -107,7 +99,7 @@ Run the agent as a Telegram bot with long polling.
 ### CLI Options
 
 ```bash
-pi --help
+topagent --help
 
 Options:
   --api-key KEY      OpenRouter API key (or set OPENROUTER_API_KEY env var)
@@ -125,5 +117,5 @@ This agent can read/write/edit files, run shell commands, and execute git operat
 ## Uninstall
 
 ```bash
-cargo uninstall pi-cli
+cargo uninstall topagent-cli
 ```

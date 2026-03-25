@@ -1,8 +1,8 @@
 [package]
 edition = "2021"
 version = "0.1.0"
-name = "pi-core"
-repository = "https://github.com/TopWayAI/rust-pi"
+name = "topagent-core"
+repository = "https://github.com/TopWayAI/topagent"
 
 [dependencies]
 anyhow = "1"

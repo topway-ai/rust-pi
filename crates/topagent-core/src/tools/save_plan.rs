@@ -5,7 +5,7 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const PLANS_DIR: &str = ".rust-pi/plans";
+const PLANS_DIR: &str = ".topagent/plans";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavePlanArgs {
@@ -119,13 +119,13 @@ impl crate::tools::Tool for SavePlanTool {
             }
         }
 
-        content.push_str("\n---\n*Saved by rust-pi*\n");
+        content.push_str("\n---\n*Saved by topagent*\n");
 
         std::fs::write(&filepath, &content)
             .map_err(|e| Error::ToolFailed(format!("save_plan: failed to write file: {}", e)))?;
 
         Ok(format!(
-            "Plan saved to .rust-pi/plans/{}\n\n{}",
+            "Plan saved to .topagent/plans/{}\n\n{}",
             filename, content
         ))
     }
@@ -159,7 +159,7 @@ mod tests {
         let result = tool.execute(args, &ctx);
         assert!(result.is_ok(), "save_plan failed: {:?}", result);
         let output = result.unwrap();
-        assert!(output.contains(".rust-pi/plans/"));
+        assert!(output.contains(".topagent/plans/"));
         assert!(output.contains("Test Plan Title"));
         assert!(output.contains("Test task 1"));
         assert!(output.contains("Test task 2"));

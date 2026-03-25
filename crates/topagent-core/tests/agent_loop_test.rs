@@ -1,11 +1,11 @@
-use pi_core::{
+use std::sync::{Arc, RwLock};
+use tempfile::TempDir;
+use topagent_core::{
     context::ExecutionContext,
     tools::{BashTool, EditTool, GitDiffTool, ReadTool, Tool, WriteTool},
     Agent, Content, Error, Message, Provider, ProviderResponse, Role, RuntimeOptions,
     ToolCallEntry,
 };
-use std::sync::{Arc, RwLock};
-use tempfile::TempDir;
 
 fn make_test_context() -> (ExecutionContext, TempDir) {
     let temp = TempDir::new().unwrap();
@@ -49,7 +49,7 @@ impl TransientFailProvider {
 }
 
 impl Provider for TransientFailProvider {
-    fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+    fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
         let mut fail_count = self.fail_count.write().unwrap();
         if *fail_count > 0 {
             *fail_count -= 1;
@@ -82,7 +82,7 @@ impl EmptyResponseProvider {
 }
 
 impl Provider for EmptyResponseProvider {
-    fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+    fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
         let mut remaining = self.remaining.write().unwrap();
         if *remaining > 0 {
             *remaining -= 1;
@@ -101,7 +101,7 @@ impl Provider for EmptyResponseProvider {
 struct RunawayProvider;
 
 impl Provider for RunawayProvider {
-    fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+    fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
         Ok(ProviderResponse::ToolCall {
             id: "1".into(),
             name: "bash".into(),
@@ -123,7 +123,7 @@ impl MalformedArgsProvider {
 }
 
 impl Provider for MalformedArgsProvider {
-    fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+    fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
         let mut remaining = self.remaining.write().unwrap();
         if *remaining > 0 {
             *remaining -= 1;
@@ -150,7 +150,7 @@ fn test_agent_returns_final_response() {
     let responses = vec![ProviderResponse::Message(Message::assistant(
         "Hello, how can I help?",
     ))];
-    let provider = pi_core::ScriptedProvider::new(responses);
+    let provider = topagent_core::ScriptedProvider::new(responses);
     let mut agent = Agent::new(Box::new(provider), make_tools());
 
     let result = agent.run(&ctx, "say hello");
@@ -169,7 +169,7 @@ fn test_agent_executes_tool_and_continues() {
         },
         ProviderResponse::Message(Message::assistant("Command executed successfully")),
     ];
-    let provider = pi_core::ScriptedProvider::new(responses);
+    let provider = topagent_core::ScriptedProvider::new(responses);
     let mut agent = Agent::new(Box::new(provider), make_tools());
 
     let result = agent.run(&ctx, "run a command");
@@ -190,7 +190,7 @@ fn test_agent_reads_file() {
         },
         ProviderResponse::Message(Message::assistant("File contains: hello world")),
     ];
-    let provider = pi_core::ScriptedProvider::new(responses);
+    let provider = topagent_core::ScriptedProvider::new(responses);
     let mut agent = Agent::new(Box::new(provider), make_tools());
 
     let result = agent.run(&ctx, "read the file");
@@ -284,7 +284,7 @@ fn test_agent_unknown_tool_produces_error_message() {
         }
     }
     impl Provider for UnknownToolProvider {
-        fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
             let mut remaining = self.remaining.write().unwrap();
             if *remaining > 0 {
                 *remaining -= 1;
@@ -372,7 +372,7 @@ fn test_agent_loads_commands_from_workspace() {
 
     struct TestProvider;
     impl Provider for TestProvider {
-        fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::Message(Message::assistant("done")))
         }
     }
@@ -394,7 +394,7 @@ fn test_agent_commands_json_missing_is_ok() {
 
     struct TestProvider;
     impl Provider for TestProvider {
-        fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::Message(Message::assistant("done")))
         }
     }
@@ -415,7 +415,7 @@ fn test_repeated_runs_do_not_duplicate_genesis_tools() {
 
     struct TestProvider;
     impl Provider for TestProvider {
-        fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::Message(Message::assistant("done")))
         }
     }
@@ -460,10 +460,10 @@ fn test_repeated_runs_do_not_duplicate_genesis_tools() {
 fn test_genesis_tools_become_external_after_verification() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".rust-pi/tools/my_tool")).unwrap();
-    std::fs::write(root.join(".rust-pi/tools/my_tool/script.sh"), "echo hello").unwrap();
+    std::fs::create_dir_all(root.join(".topagent/tools/my_tool")).unwrap();
+    std::fs::write(root.join(".topagent/tools/my_tool/script.sh"), "echo hello").unwrap();
     std::fs::write(
-        root.join(".rust-pi/tools/my_tool/manifest.json"),
+        root.join(".topagent/tools/my_tool/manifest.json"),
         serde_json::json!({
             "name": "my_tool",
             "description": "a verified tool",
@@ -481,7 +481,7 @@ fn test_genesis_tools_become_external_after_verification() {
 
     struct TestProvider;
     impl Provider for TestProvider {
-        fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::Message(Message::assistant("done")))
         }
     }
@@ -507,7 +507,7 @@ fn test_agent_commands_json_invalid_fails() {
 
     struct TestProvider;
     impl Provider for TestProvider {
-        fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::Message(Message::assistant("done")))
         }
     }
@@ -539,7 +539,7 @@ fn test_agent_multiple_tool_calls_execute_sequentially() {
         ]),
         ProviderResponse::Message(Message::assistant("done")),
     ];
-    let provider = pi_core::ScriptedProvider::new(responses);
+    let provider = topagent_core::ScriptedProvider::new(responses);
     let mut agent = Agent::new(Box::new(provider), make_tools());
 
     let result = agent.run(&ctx, "read two files");
@@ -572,7 +572,7 @@ fn test_agent_second_tool_failure_continues_batch() {
         ]),
         ProviderResponse::Message(Message::assistant("done")),
     ];
-    let provider = pi_core::ScriptedProvider::new(responses);
+    let provider = topagent_core::ScriptedProvider::new(responses);
     let mut agent = Agent::new(Box::new(provider), make_tools());
 
     let result = agent.run(&ctx, "call three tools");
@@ -589,7 +589,7 @@ fn test_agent_multi_tool_batch_counts_steps() {
 
     struct MultiToolProvider;
     impl Provider for MultiToolProvider {
-        fn complete(&self, _messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::ToolCalls(vec![
                 ToolCallEntry {
                     id: "1".into(),
@@ -636,7 +636,7 @@ fn test_no_pi_md_includes_absence_note() {
         }
     }
     impl Provider for CheckPromptProvider {
-        fn complete(&self, messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+        fn complete(&self, messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
             let mut captured = self.captured_messages.write().unwrap();
             captured.extend(messages.to_vec());
             Ok(ProviderResponse::Message(Message::assistant("done")))
@@ -649,17 +649,21 @@ fn test_no_pi_md_includes_absence_note() {
     let captured = provider_ref.read().unwrap();
     let system_prompt = captured.first().and_then(|m| m.as_text()).unwrap_or("");
     assert!(
-        system_prompt.contains("No PI.md file is present"),
-        "expected PI.md absence note in system prompt: {}",
+        system_prompt.contains("No TOPAGENT.md file is present"),
+        "expected TOPAGENT.md absence note in system prompt: {}",
         system_prompt
     );
 }
 
 #[test]
-fn test_pi_md_loaded_when_present() {
+fn test_topagent_md_loaded_when_present() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().to_path_buf();
-    std::fs::write(root.join("PI.md"), "# Custom Instructions\nUse Rust.\n").unwrap();
+    std::fs::write(
+        root.join("TOPAGENT.md"),
+        "# Custom Instructions\nUse Rust.\n",
+    )
+    .unwrap();
     let ctx = ExecutionContext::new(root);
 
     struct CheckPromptProvider {
@@ -673,7 +677,7 @@ fn test_pi_md_loaded_when_present() {
         }
     }
     impl Provider for CheckPromptProvider {
-        fn complete(&self, messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+        fn complete(&self, messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
             let mut captured = self.captured_messages.write().unwrap();
             captured.extend(messages.to_vec());
             Ok(ProviderResponse::Message(Message::assistant("done")))
@@ -687,12 +691,12 @@ fn test_pi_md_loaded_when_present() {
     let system_prompt = captured.first().and_then(|m| m.as_text()).unwrap_or("");
     assert!(
         system_prompt.contains("Custom Instructions"),
-        "expected PI.md content in system prompt: {}",
+        "expected TOPAGENT.md content in system prompt: {}",
         system_prompt
     );
     assert!(
-        !system_prompt.contains("No PI.md file is present"),
-        "should not have absence note when PI.md exists: {}",
+        !system_prompt.contains("No TOPAGENT.md file is present"),
+        "should not have absence note when TOPAGENT.md exists: {}",
         system_prompt
     );
 }
@@ -709,7 +713,7 @@ fn test_agent_tracks_changed_files_on_write() {
         },
         ProviderResponse::Message(Message::assistant("file written")),
     ];
-    let provider = pi_core::ScriptedProvider::new(responses);
+    let provider = topagent_core::ScriptedProvider::new(responses);
     let mut agent = Agent::new(Box::new(provider), make_tools());
 
     let result = agent.run(&ctx, "write a file");
@@ -734,7 +738,7 @@ fn test_agent_tracks_changed_files_on_edit() {
         },
         ProviderResponse::Message(Message::assistant("file edited")),
     ];
-    let provider = pi_core::ScriptedProvider::new(responses);
+    let provider = topagent_core::ScriptedProvider::new(responses);
     let mut agent = Agent::new(Box::new(provider), make_tools());
 
     let result = agent.run(&ctx, "edit a file");
@@ -761,7 +765,7 @@ fn test_agent_tracks_multiple_changed_files() {
         ]),
         ProviderResponse::Message(Message::assistant("files written")),
     ];
-    let provider = pi_core::ScriptedProvider::new(responses);
+    let provider = topagent_core::ScriptedProvider::new(responses);
     let mut agent = Agent::new(Box::new(provider), make_tools());
 
     let result = agent.run(&ctx, "write two files");
@@ -784,7 +788,7 @@ fn test_agent_tracks_changed_files_after_failed_write() {
         },
         ProviderResponse::Message(Message::assistant("write failed")),
     ];
-    let provider = pi_core::ScriptedProvider::new(responses);
+    let provider = topagent_core::ScriptedProvider::new(responses);
     let mut agent = Agent::new(Box::new(provider), make_tools());
 
     let result = agent.run(&ctx, "try to write to invalid path");
@@ -828,7 +832,7 @@ fn test_git_diff_shows_actual_content() {
     let ctx = ExecutionContext::new(root);
 
     let mut agent = Agent::new(
-        Box::new(pi_core::ScriptedProvider::new(vec![
+        Box::new(topagent_core::ScriptedProvider::new(vec![
             ProviderResponse::ToolCall {
                 id: "1".into(),
                 name: "git_diff".into(),
@@ -868,7 +872,7 @@ fn test_verification_section_in_system_prompt() {
         }
     }
     impl Provider for CheckPromptProvider {
-        fn complete(&self, messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+        fn complete(&self, messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
             let mut captured = self.captured_messages.write().unwrap();
             captured.extend(messages.to_vec());
             Ok(ProviderResponse::Message(Message::assistant("done")))

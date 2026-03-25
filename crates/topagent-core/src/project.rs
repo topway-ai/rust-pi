@@ -1,7 +1,7 @@
 use crate::Error;
 use std::path::Path;
 
-pub const PROJECT_INSTRUCTIONS_FILENAME: &str = "PI.md";
+pub const PROJECT_INSTRUCTIONS_FILENAME: &str = "TOPAGENT.md";
 
 #[derive(Debug)]
 pub enum ProjectInstructionResult {
@@ -20,7 +20,7 @@ pub fn load_project_instructions(workspace_root: &Path) -> Result<ProjectInstruc
     match std::fs::read_to_string(&pi_path) {
         Ok(content) => Ok(ProjectInstructionResult::Loaded(content)),
         Err(e) => Ok(ProjectInstructionResult::ReadError(format!(
-            "PI.md exists at {} but could not be read: {}",
+            "TOPAGENT.md exists at {} but could not be read: {}",
             pi_path.display(),
             e
         ))),

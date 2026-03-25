@@ -1,14 +1,14 @@
-use crate::Result;
 use crate::context::ToolContext;
 use crate::error::Error;
 use crate::external::ExternalTool;
 use crate::tool_spec::ToolSpec;
+use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
 
-const TOOLS_DIR: &str = ".rust-pi/tools";
-const GENESIS_DIR: &str = ".rust-pi/tool-genesis";
+const TOOLS_DIR: &str = ".topagent/tools";
+const GENESIS_DIR: &str = ".topagent/tool-genesis";
 const PROPOSALS_DIR: &str = "proposals";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -609,7 +609,7 @@ impl Tool for ListGeneratedToolsTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "list_generated_tools".to_string(),
-            description: "list all generated tools in .rust-pi/tools/ with their name, description, and verification status".to_string(),
+            description: "list all generated tools in .topagent/tools/ with their name, description, and verification status".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -622,7 +622,7 @@ impl Tool for ListGeneratedToolsTool {
         let genesis = ToolGenesis::new(ctx.exec.workspace_root.clone());
         let tools = genesis.list_generated_tools()?;
         if tools.is_empty() {
-            return Ok("no generated tools found in .rust-pi/tools/".to_string());
+            return Ok("no generated tools found in .topagent/tools/".to_string());
         }
         let mut lines = Vec::new();
         for t in tools {
@@ -919,7 +919,7 @@ impl Tool for ListToolProposalsTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "list_tool_proposals".to_string(),
-            description: "list all tool design proposals in .rust-pi/tool-genesis/proposals/"
+            description: "list all tool design proposals in .topagent/tool-genesis/proposals/"
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -933,7 +933,7 @@ impl Tool for ListToolProposalsTool {
         let genesis = ToolGenesis::new(ctx.exec.workspace_root.clone());
         let proposals = genesis.list_proposals()?;
         if proposals.is_empty() {
-            return Ok("no tool proposals found in .rust-pi/tool-genesis/proposals/".to_string());
+            return Ok("no tool proposals found in .topagent/tool-genesis/proposals/".to_string());
         }
         let mut lines = Vec::new();
         for p in proposals {
@@ -961,7 +961,7 @@ impl Tool for CreateToolTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "create_tool".to_string(),
-            description: "create a new reusable workspace-local tool with verification; tools are stored in .rust-pi/tools/ and only become available after passing verification".to_string(),
+            description: "create a new reusable workspace-local tool with verification; tools are stored in .topagent/tools/ and only become available after passing verification".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1503,7 +1503,7 @@ mod tests {
             )
             .unwrap();
 
-        let tool_dir = temp.path().join(".rust-pi/tools/incomplete_tool");
+        let tool_dir = temp.path().join(".topagent/tools/incomplete_tool");
         let manifest_path = tool_dir.join("manifest.json");
         let script_path = tool_dir.join("script.sh");
 
@@ -1602,7 +1602,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let genesis = ToolGenesis::new(temp.path().to_path_buf());
 
-        let tool_dir = temp.path().join(".rust-pi/tools/bad_manifest");
+        let tool_dir = temp.path().join(".topagent/tools/bad_manifest");
         std::fs::create_dir_all(&tool_dir).unwrap();
         std::fs::write(tool_dir.join("manifest.json"), "not valid json{{{").unwrap();
 
@@ -1700,7 +1700,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let genesis = ToolGenesis::new(temp.path().to_path_buf());
 
-        let tool_dir = temp.path().join(".rust-pi/tools/legacy_tool");
+        let tool_dir = temp.path().join(".topagent/tools/legacy_tool");
         std::fs::create_dir_all(&tool_dir).unwrap();
         std::fs::write(
             tool_dir.join("manifest.json"),

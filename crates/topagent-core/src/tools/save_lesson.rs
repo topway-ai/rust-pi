@@ -4,7 +4,7 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const LESSONS_DIR: &str = ".rust-pi/lessons";
+const LESSONS_DIR: &str = ".topagent/lessons";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveLessonArgs {
@@ -104,13 +104,13 @@ impl crate::tools::Tool for SaveLessonTool {
             content.push_str(&format!("## Avoid Next Time\n\n{}\n\n", avoid));
         }
 
-        content.push_str("---\n*Saved by rust-pi*\n");
+        content.push_str("---\n*Saved by topagent*\n");
 
         std::fs::write(&filepath, &content)
             .map_err(|e| Error::ToolFailed(format!("save_lesson: failed to write file: {}", e)))?;
 
         Ok(format!(
-            "Lesson saved to .rust-pi/lessons/{}\n\n{}",
+            "Lesson saved to .topagent/lessons/{}\n\n{}",
             filename, content
         ))
     }
@@ -141,7 +141,7 @@ mod tests {
         let result = tool.execute(args, &ctx);
         assert!(result.is_ok(), "save_lesson failed: {:?}", result);
         let output = result.unwrap();
-        assert!(output.contains(".rust-pi/lessons/"));
+        assert!(output.contains(".topagent/lessons/"));
         assert!(output.contains("Test Lesson"));
         assert!(output.contains("Implemented new feature"));
         assert!(output.contains("Testing is important"));

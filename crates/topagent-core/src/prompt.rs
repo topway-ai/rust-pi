@@ -2,16 +2,16 @@ use crate::tool_spec::ToolSpec;
 
 pub const PROJECT_INSTRUCTIONS_SECTION: &str = "## Project Instructions\n\
 \
-Project-specific guidance may exist in PI.md in the workspace root. If present, it has already been\nloaded above and should be followed.\n";
+Project-specific guidance may exist in TOPAGENT.md in the workspace root. If present, it has already been\nloaded above and should be followed.\n";
 
 pub const NO_PI_MD_NOTE: &str =
-    "\n[Note: No PI.md file is present in the workspace root. Do not try to read it.]\n";
+    "\n[Note: No TOPAGENT.md file is present in the workspace root. Do not try to read it.]\n";
 
 pub const PLANNING_SECTION: &str = "## Planning\n\
 \nFor non-trivial multi-step tasks, follow Research → Plan → Build:\n\
 1. Research: inspect relevant files, git context, project instructions first\n\
 2. Plan: use update_plan to create a plan with steps\n\
-3. Build: execute plan items, updating status as you complete each step\n\nFor simple one-step tasks, skip planning and act directly.\n\nUseful tools:\n- update_plan: create/replace plan with items [{content, status}]\n- save_plan: archive current plan to .rust-pi/plans/ for reuse\n- save_lesson: save a lesson note to .rust-pi/lessons/ when worth recording\n\nPlans can be saved when they represent a useful reusable approach.\nLessons should be saved sparingly - only for genuinely useful insights.\n";
+3. Build: execute plan items, updating status as you complete each step\n\nFor simple one-step tasks, skip planning and act directly.\n\nUseful tools:\n- update_plan: create/replace plan with items [{content, status}]\n- save_plan: archive current plan to .topagent/plans/ for reuse\n- save_lesson: save a lesson note to .topagent/lessons/ when worth recording\n\nPlans can be saved when they represent a useful reusable approach.\nLessons should be saved sparingly - only for genuinely useful insights.\n";
 
 pub const GIT_CONTEXT_SECTION: &str = "## Git Context\n\
 \nYou have access to git tools for repository awareness:\n\

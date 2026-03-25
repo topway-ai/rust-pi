@@ -162,7 +162,7 @@ impl Agent {
 
         match get_project_instructions_or_error(&ctx.workspace_root)? {
             Some(project_instructions) => {
-                system_prompt.push_str("\n## Project Instructions (from PI.md)\n\n");
+                system_prompt.push_str("\n## Project Instructions (from TOPAGENT.md)\n\n");
                 system_prompt.push_str(&project_instructions);
                 system_prompt.push('\n');
             }

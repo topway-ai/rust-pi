@@ -1,6 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pi_core::{
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use topagent_core::{
     channel::{ChannelAdapter, OutgoingMessage},
     context::ExecutionContext,
     create_provider,
@@ -8,14 +11,11 @@ use pi_core::{
     tools::default_tools,
     Agent, Message, Provider, ProviderResponse, RuntimeOptions, TelegramAdapter,
 };
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(author, version, about = "pi-coding-agent: minimal coding agent")]
+#[command(author, version, about = "topagent: minimal coding agent")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -316,7 +316,10 @@ fn run_telegram_serve(
 struct EchoProvider;
 
 impl Provider for EchoProvider {
-    fn complete(&self, messages: &[pi_core::Message]) -> Result<ProviderResponse, pi_core::Error> {
+    fn complete(
+        &self,
+        messages: &[topagent_core::Message],
+    ) -> Result<ProviderResponse, topagent_core::Error> {
         let last = messages
             .last()
             .map(|m| m.as_text().unwrap_or(""))
@@ -391,7 +394,7 @@ impl ChatSessionManager {
                 if response.len() <= max_len {
                     vec![response]
                 } else {
-                    pi_core::channel::telegram::chunk_text(&response, max_len)
+                    topagent_core::channel::telegram::chunk_text(&response, max_len)
                 }
             }
             Err(e) => {

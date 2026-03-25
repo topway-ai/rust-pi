@@ -1,11 +1,11 @@
-use pi_core::{
+use std::sync::{Arc, Mutex, RwLock};
+use tempfile::TempDir;
+use topagent_core::{
+    Agent, Content, Message, Provider, ProviderResponse, Role, RuntimeOptions,
     context::ExecutionContext,
     plan::should_use_plan,
     tools::{BashTool, EditTool, ReadTool, Tool, WriteTool},
-    Agent, Content, Message, Provider, ProviderResponse, Role, RuntimeOptions,
 };
-use std::sync::{Arc, Mutex, RwLock};
-use tempfile::TempDir;
 
 fn make_test_context() -> (ExecutionContext, TempDir) {
     let temp = TempDir::new().unwrap();
@@ -39,7 +39,7 @@ impl RecordingProvider {
 }
 
 impl Provider for RecordingProvider {
-    fn complete(&self, messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+    fn complete(&self, messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
         {
             let mut recorded = self.recorded_messages.lock().unwrap();
             recorded.extend(messages.iter().cloned());
