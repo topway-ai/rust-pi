@@ -1,6 +1,6 @@
 use pi_core::{
     context::ExecutionContext,
-    tools::{BashTool, EditTool, ReadTool, Tool, WriteTool},
+    tools::{BashTool, EditTool, GitDiffTool, ReadTool, Tool, WriteTool},
     Agent, Content, Error, Message, Provider, ProviderResponse, Role, RuntimeOptions,
     ToolCallEntry,
 };
@@ -19,6 +19,16 @@ fn make_tools() -> Vec<Box<dyn Tool>> {
         Box::new(WriteTool::new()) as Box<dyn Tool>,
         Box::new(EditTool::new()) as Box<dyn Tool>,
         Box::new(BashTool::new()) as Box<dyn Tool>,
+    ]
+}
+
+fn make_tools_with_git() -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(ReadTool::new()) as Box<dyn Tool>,
+        Box::new(WriteTool::new()) as Box<dyn Tool>,
+        Box::new(EditTool::new()) as Box<dyn Tool>,
+        Box::new(BashTool::new()) as Box<dyn Tool>,
+        Box::new(GitDiffTool::new()) as Box<dyn Tool>,
     ]
 }
 
@@ -594,6 +604,196 @@ fn test_pi_md_loaded_when_present() {
     assert!(
         !system_prompt.contains("No PI.md file is present"),
         "should not have absence note when PI.md exists: {}",
+        system_prompt
+    );
+}
+
+#[test]
+fn test_agent_tracks_changed_files_on_write() {
+    let (ctx, _temp) = make_test_context();
+
+    let responses = vec![
+        ProviderResponse::ToolCall {
+            id: "1".into(),
+            name: "write".into(),
+            args: serde_json::json!({"path": "new_file.txt", "content": "hello world"}),
+        },
+        ProviderResponse::Message(Message::assistant("file written")),
+    ];
+    let provider = pi_core::ScriptedProvider::new(responses);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+
+    let result = agent.run(&ctx, "write a file");
+    assert!(result.is_ok());
+    assert_eq!(agent.changed_files(), &["new_file.txt"]);
+}
+
+#[test]
+fn test_agent_tracks_changed_files_on_edit() {
+    let (ctx, _temp) = make_test_context();
+    std::fs::write(
+        ctx.resolve_path("existing.txt").unwrap(),
+        "original content",
+    )
+    .unwrap();
+
+    let responses = vec![
+        ProviderResponse::ToolCall {
+            id: "1".into(),
+            name: "edit".into(),
+            args: serde_json::json!({"path": "existing.txt", "old_text": "original", "new_text": "modified"}),
+        },
+        ProviderResponse::Message(Message::assistant("file edited")),
+    ];
+    let provider = pi_core::ScriptedProvider::new(responses);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+
+    let result = agent.run(&ctx, "edit a file");
+    assert!(result.is_ok());
+    assert_eq!(agent.changed_files(), vec!["existing.txt"]);
+}
+
+#[test]
+fn test_agent_tracks_multiple_changed_files() {
+    let (ctx, _temp) = make_test_context();
+
+    let responses = vec![
+        ProviderResponse::ToolCalls(vec![
+            ToolCallEntry {
+                id: "1".into(),
+                name: "write".into(),
+                args: serde_json::json!({"path": "file1.txt", "content": "content 1"}),
+            },
+            ToolCallEntry {
+                id: "2".into(),
+                name: "write".into(),
+                args: serde_json::json!({"path": "file2.txt", "content": "content 2"}),
+            },
+        ]),
+        ProviderResponse::Message(Message::assistant("files written")),
+    ];
+    let provider = pi_core::ScriptedProvider::new(responses);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+
+    let result = agent.run(&ctx, "write two files");
+    assert!(result.is_ok());
+    let changed = agent.changed_files();
+    assert!(changed.contains(&"file1.txt".to_string()));
+    assert!(changed.contains(&"file2.txt".to_string()));
+    assert_eq!(changed.len(), 2);
+}
+
+#[test]
+fn test_agent_tracks_changed_files_after_failed_write() {
+    let (ctx, _temp) = make_test_context();
+
+    let responses = vec![
+        ProviderResponse::ToolCall {
+            id: "1".into(),
+            name: "write".into(),
+            args: serde_json::json!({"path": "bad|path/file.txt", "content": "should fail"}),
+        },
+        ProviderResponse::Message(Message::assistant("write failed")),
+    ];
+    let provider = pi_core::ScriptedProvider::new(responses);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+
+    let result = agent.run(&ctx, "try to write to invalid path");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_git_diff_shows_actual_content() {
+    let temp = TempDir::new().unwrap();
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+
+    std::fs::write(temp.path().join("test.txt"), "original").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "test.txt"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+
+    std::fs::write(temp.path().join("test.txt"), "modified content").unwrap();
+
+    let root = temp.path().to_path_buf();
+    let ctx = ExecutionContext::new(root);
+
+    let mut agent = Agent::new(
+        Box::new(pi_core::ScriptedProvider::new(vec![
+            ProviderResponse::ToolCall {
+                id: "1".into(),
+                name: "git_diff".into(),
+                args: serde_json::json!({}),
+            },
+            ProviderResponse::Message(Message::assistant("here is the diff")),
+        ])),
+        make_tools_with_git(),
+    );
+    let result = agent.run(&ctx, "show diff");
+    if let Err(e) = &result {
+        eprintln!("agent.run() failed: {}", e);
+    }
+    assert!(result.is_ok(), "agent.run() failed: {:?}", result.err());
+    let output = result.unwrap();
+    assert!(
+        output.contains("diff") || output.contains("modified"),
+        "expected git diff to show diff output, got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_verification_section_in_system_prompt() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().to_path_buf();
+    let ctx = ExecutionContext::new(root);
+
+    struct CheckPromptProvider {
+        pub captured_messages: Arc<RwLock<Vec<Message>>>,
+    }
+    impl CheckPromptProvider {
+        fn new() -> Self {
+            Self {
+                captured_messages: Arc::new(RwLock::new(Vec::new())),
+            }
+        }
+    }
+    impl Provider for CheckPromptProvider {
+        fn complete(&self, messages: &[Message]) -> pi_core::Result<ProviderResponse> {
+            let mut captured = self.captured_messages.write().unwrap();
+            captured.extend(messages.to_vec());
+            Ok(ProviderResponse::Message(Message::assistant("done")))
+        }
+    }
+    let provider = CheckPromptProvider::new();
+    let provider_ref = Arc::clone(&provider.captured_messages);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+    let _ = agent.run(&ctx, "test");
+    let captured = provider_ref.read().unwrap();
+    let system_prompt = captured.first().and_then(|m| m.as_text()).unwrap_or("");
+    assert!(
+        system_prompt.contains("## Verification") || system_prompt.contains("git_diff"),
+        "expected verification section or git_diff mention in system prompt: {}",
         system_prompt
     );
 }

@@ -14,12 +14,16 @@ pub const PLANNING_SECTION: &str = "## Planning\n\
 3. Build: execute plan items, updating status as you complete each step\n\nFor simple one-step tasks, skip planning and act directly.\n\nUseful tools:\n- update_plan: create/replace plan with items [{content, status}]\n- save_plan: archive current plan to .rust-pi/plans/ for reuse\n- save_lesson: save a lesson note to .rust-pi/lessons/ when worth recording\n\nPlans can be saved when they represent a useful reusable approach.\nLessons should be saved sparingly - only for genuinely useful insights.\n";
 
 pub const GIT_CONTEXT_SECTION: &str = "## Git Context\n\
-\
-You have access to git tools for repository awareness:\n\
+\nYou have access to git tools for repository awareness:\n\
 - git_status: Check for uncommitted changes before making edits\n\
 - git_branch: Know your current branch before creating commits or switching context\n\
 - git_diff: Review changes before committing or submitting\n\
 Use git tools to stay aware of repository state, especially before write operations.\n";
+
+pub const VERIFICATION_SECTION: &str = "## Verification\n\
+\nAfter making changes (edit, write, git operations), when the user asks to verify, show diff, or confirm changes:\n\
+1. Call git_diff to show what actually changed\n2. Report which files were modified\n3. Provide evidence of the change, not just a claim\n\
+Do not claim a change succeeded without showing verification evidence when asked.\n";
 
 pub fn build_system_prompt(tools: &[ToolSpec], external_tools: &[ToolSpec]) -> String {
     let mut prompt = String::from(
@@ -28,6 +32,7 @@ pub fn build_system_prompt(tools: &[ToolSpec], external_tools: &[ToolSpec]) -> S
     prompt.push_str(PROJECT_INSTRUCTIONS_SECTION);
     prompt.push_str(PLANNING_SECTION);
     prompt.push_str(GIT_CONTEXT_SECTION);
+    prompt.push_str(VERIFICATION_SECTION);
 
     if !external_tools.is_empty() {
         prompt.push_str("External tools:\n\n");

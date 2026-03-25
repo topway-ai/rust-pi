@@ -37,6 +37,7 @@ impl CommandRegistry {
     }
 
     pub fn load_from_file<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
+        // TODO: consider logging which commands are being loaded/overwritten
         let content = std::fs::read_to_string(path)?;
         let commands: HashMap<String, CustomCommand> = serde_json::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

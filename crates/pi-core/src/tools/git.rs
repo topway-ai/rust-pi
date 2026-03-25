@@ -95,7 +95,7 @@ impl crate::tools::Tool for GitDiffTool {
             serde_json::from_value(args).map_err(|e| Error::InvalidInput(e.to_string()))?;
 
         let mut cmd = Command::new("git");
-        cmd.args(["diff", "--stat"]);
+        cmd.args(["diff"]);
 
         if let Some(path) = &args.path {
             let full_path = ctx.exec.resolve_path(path)?;

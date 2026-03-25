@@ -1,4 +1,4 @@
-# rust-pi
+# Rust PI - Local AI Coding Agent
 
 A minimal coding agent that runs locally in your workspace. It uses an LLM via OpenRouter to execute file operations, shell commands, and git actions.
 

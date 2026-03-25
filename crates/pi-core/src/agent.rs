@@ -8,6 +8,7 @@ use crate::runtime::RuntimeOptions;
 use crate::session::Session;
 use crate::tools::{SaveLessonTool, SavePlanTool, Tool, ToolRegistry, UpdatePlanTool};
 use crate::{Error, Message, Provider, ProviderResponse, Result};
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +20,7 @@ pub struct Agent {
     options: RuntimeOptions,
     plan: Arc<Mutex<Plan>>,
     hooks: HookRegistry,
+    changed_files: RefCell<Vec<String>>,
 }
 
 impl Agent {
@@ -53,6 +55,7 @@ impl Agent {
             options,
             plan,
             hooks: HookRegistry::new(),
+            changed_files: RefCell::new(Vec::new()),
         }
     }
 
@@ -74,6 +77,38 @@ impl Agent {
 
     pub fn external_tools_mut(&mut self) -> &mut ExternalToolRegistry {
         &mut self.external_tools
+    }
+
+    pub fn changed_files(&self) -> Vec<String> {
+        self.changed_files.borrow().clone()
+    }
+
+    fn track_changed_file(&self, tool_name: &str, args: &serde_json::Value) {
+        if tool_name == "write" || tool_name == "edit" {
+            if let Some(path) = args.get("path").and_then(|p| p.as_str()) {
+                let mut changed = self.changed_files.borrow_mut();
+                if !changed.contains(&path.to_string()) {
+                    changed.push(path.to_string());
+                }
+            }
+        }
+    }
+
+    fn extract_changed_path(&self, tool_name: &str, args: &serde_json::Value) -> Option<String> {
+        if tool_name == "write" || tool_name == "edit" {
+            args.get("path")
+                .and_then(|p| p.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn record_changed_file(&self, path: String) {
+        let mut changed = self.changed_files.borrow_mut();
+        if !changed.contains(&path) {
+            changed.push(path);
+        }
     }
 
     pub fn load_external_tools_from_file<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
@@ -259,6 +294,7 @@ impl Agent {
                         }
                     }
 
+                    let changed_path = self.extract_changed_path(&name, &args);
                     let mut result = match tool.execute(args.clone(), &tool_ctx) {
                         Ok(r) => r,
                         Err(e) => {
@@ -279,6 +315,9 @@ impl Agent {
                         result = hooks.run_post_hooks(&name, &args, &result, &tool_ctx);
                     }
 
+                    if let Some(path) = changed_path {
+                        self.record_changed_file(path);
+                    }
                     self.session
                         .add_message(Message::tool_request(id.clone(), name, args));
                     self.session.add_message(Message::tool_result(id, result));
@@ -385,6 +424,7 @@ impl Agent {
                             result = hooks.run_post_hooks(&name, &args, &result, &tool_ctx);
                         }
 
+                        self.track_changed_file(&name, &args);
                         self.session
                             .add_message(Message::tool_request(id.clone(), name, args));
                         self.session.add_message(Message::tool_result(id, result));
