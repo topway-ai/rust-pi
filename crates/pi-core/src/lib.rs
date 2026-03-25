@@ -16,6 +16,7 @@ pub mod provider;
 pub mod provider_factory;
 pub mod runtime;
 pub mod session;
+pub mod tool_genesis;
 pub mod tool_spec;
 pub mod tools;
 
@@ -31,7 +32,7 @@ pub use model::{ModelRoute, ProviderId, RoutingPolicy, TaskCategory};
 pub use openrouter::OpenRouterProvider;
 pub use plan::{Plan, TodoItem, TodoStatus};
 pub use project::{
-    get_project_instructions_or_error, load_project_instructions, ProjectInstructionResult,
+    ProjectInstructionResult, get_project_instructions_or_error, load_project_instructions,
 };
 pub use provider::{Provider, ProviderResponse, ScriptedProvider, ToolCallEntry};
 pub use provider_factory::create_provider;

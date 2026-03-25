@@ -6,6 +6,7 @@ use crate::project::get_project_instructions_or_error;
 use crate::prompt;
 use crate::runtime::RuntimeOptions;
 use crate::session::Session;
+use crate::tool_genesis::{CreateToolTool, ListGeneratedToolsTool, RepairToolTool, ToolGenesis};
 use crate::tools::{SaveLessonTool, SavePlanTool, Tool, ToolRegistry, UpdatePlanTool};
 use crate::{Error, Message, Provider, ProviderResponse, Result};
 use std::cell::RefCell;
@@ -126,9 +127,22 @@ impl Agent {
         Ok(())
     }
 
+    pub fn load_generated_tools_from_workspace(&mut self, workspace_root: &Path) -> Result<()> {
+        let genesis = ToolGenesis::new(workspace_root.to_path_buf());
+        let verified_tools = genesis.load_verified_tools()?;
+        for tool in verified_tools {
+            self.external_tools.register(tool);
+        }
+        self.tools.add(Box::new(CreateToolTool::new()));
+        self.tools.add(Box::new(RepairToolTool::new()));
+        self.tools.add(Box::new(ListGeneratedToolsTool::new()));
+        Ok(())
+    }
+
     pub fn run(&mut self, ctx: &ExecutionContext, instruction: &str) -> Result<String> {
         self.external_tools = ExternalToolRegistry::new();
         self.load_commands_from_workspace(&ctx.workspace_root)?;
+        self.load_generated_tools_from_workspace(&ctx.workspace_root)?;
 
         self.session.add_message(Message::user(instruction));
 

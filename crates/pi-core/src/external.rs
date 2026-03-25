@@ -46,6 +46,16 @@ impl ExternalTool {
         self
     }
 
+    pub fn with_command(mut self, command: &str) -> Self {
+        self.config.command = command.to_string();
+        self
+    }
+
+    pub fn with_args_template(mut self, template: &str) -> Self {
+        self.config.args_template = Some(template.to_string());
+        self
+    }
+
     pub fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.config.name.clone(),
