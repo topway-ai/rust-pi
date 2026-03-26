@@ -60,8 +60,12 @@ impl OpenRouterProvider {
 }
 
 impl Provider for OpenRouterProvider {
-    fn complete(&self, messages: &[Message]) -> Result<ProviderResponse> {
-        let request = self.build_request(messages);
+    fn complete(
+        &self,
+        messages: &[Message],
+        route: &crate::ModelRoute,
+    ) -> Result<ProviderResponse> {
+        let request = self.build_request(messages, &route.model_id);
         let response = self
             .client
             .post(format!("{}/chat/completions", OPENROUTER_BASE_URL))
@@ -89,7 +93,7 @@ impl Provider for OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
-    pub(crate) fn build_request(&self, messages: &[Message]) -> ChatRequest {
+    pub(crate) fn build_request(&self, messages: &[Message], model_id: &str) -> ChatRequest {
         let wire_messages: Vec<WireMessage> = messages.iter().map(message_to_wire).collect();
 
         let tools: Vec<ToolDefinition> = self
@@ -106,7 +110,7 @@ impl OpenRouterProvider {
             .collect();
 
         ChatRequest {
-            model: self.model.clone(),
+            model: model_id.to_string(),
             messages: wire_messages,
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice: Some(serde_json::json!({"type": "auto"})),
@@ -295,7 +299,7 @@ mod tests {
     fn test_build_request_uses_default_tools() {
         let provider = OpenRouterProvider::new("test-key", "test-model");
         let messages = vec![Message::user("test")];
-        let request = provider.build_request(&messages);
+        let request = provider.build_request(&messages, "test-model");
 
         let tools = request.tools.unwrap();
         assert_eq!(tools.len(), 9);
@@ -432,8 +436,8 @@ mod tests {
         let specs = default_tools().specs();
         let provider = OpenRouterProvider::with_tools("key", "model", specs);
         let messages = vec![Message::user("test")];
-        let request1 = provider.build_request(&messages);
-        let request2 = provider.build_request(&messages);
+        let request1 = provider.build_request(&messages, "model");
+        let request2 = provider.build_request(&messages, "model");
 
         let tools1 = request1.tools.unwrap();
         let tools2 = request2.tools.unwrap();

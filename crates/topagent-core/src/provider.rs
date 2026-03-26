@@ -1,8 +1,8 @@
-use crate::{Error, Message, Result};
+use crate::{Error, Message, ModelRoute, Result};
 use std::sync::{Arc, RwLock};
 
 pub trait Provider: Send + Sync {
-    fn complete(&self, messages: &[Message]) -> Result<ProviderResponse>;
+    fn complete(&self, messages: &[Message], route: &ModelRoute) -> Result<ProviderResponse>;
 }
 
 #[derive(Debug, Clone)]
@@ -39,7 +39,7 @@ impl ScriptedProvider {
 }
 
 impl Provider for ScriptedProvider {
-    fn complete(&self, _messages: &[Message]) -> Result<ProviderResponse> {
+    fn complete(&self, _messages: &[Message], _route: &ModelRoute) -> Result<ProviderResponse> {
         let mut idx = self.index.write().unwrap();
         if let Some(r) = self.responses.get(*idx).cloned() {
             *idx += 1;
@@ -72,9 +72,10 @@ mod tests {
             }),
         ];
         let provider = ScriptedProvider::new(responses);
+        let route = crate::ModelRoute::default();
 
-        let result1 = provider.complete(&[]).unwrap();
-        let result2 = provider.complete(&[]).unwrap();
+        let result1 = provider.complete(&[], &route).unwrap();
+        let result2 = provider.complete(&[], &route).unwrap();
 
         assert!(matches!(result1, ProviderResponse::Message(_)));
         assert!(matches!(result2, ProviderResponse::Message(_)));
@@ -89,9 +90,10 @@ mod tests {
             },
         })];
         let provider = ScriptedProvider::new(responses);
+        let route = crate::ModelRoute::default();
 
-        provider.complete(&[]).unwrap();
-        let result = provider.complete(&[]);
+        provider.complete(&[], &route).unwrap();
+        let result = provider.complete(&[], &route);
         assert!(result.is_err());
     }
 }

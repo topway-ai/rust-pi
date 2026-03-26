@@ -33,6 +33,7 @@ pub struct Agent {
     planning_gate_active: bool,
     resolved_route: ModelRoute,
     execution_stage: ExecutionStage,
+    external_tool_ran: RefCell<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -100,6 +101,7 @@ impl Agent {
             planning_gate_active: false,
             resolved_route,
             execution_stage: ExecutionStage::Research,
+            external_tool_ran: RefCell::new(false),
         }
     }
 
@@ -255,10 +257,16 @@ impl Agent {
         }
 
         if tool_name == "bash" {
+            let plan_exists = self.plan.lock().map(|p| !p.is_empty()).unwrap_or(false);
+            if plan_exists {
+                return None;
+            }
             if let Some(args) = bash_args {
                 if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
                     let class = Self::classify_bash_command(cmd);
-                    if class == BashCommandClass::ResearchSafe {
+                    if class == BashCommandClass::ResearchSafe
+                        || class == BashCommandClass::Verification
+                    {
                         return None;
                     }
                 }
@@ -376,6 +384,10 @@ impl Agent {
         self.load_commands_from_workspace(&ctx.workspace_root)?;
         self.load_generated_tools_from_workspace(&ctx.workspace_root)?;
 
+        self.changed_files.borrow_mut().clear();
+        self.bash_history.borrow_mut().clear();
+        *self.external_tool_ran.borrow_mut() = false;
+
         self.planning_gate_active =
             self.options.require_plan && should_require_research_plan_build(instruction);
 
@@ -429,7 +441,10 @@ impl Agent {
                 )));
             }
 
-            let response = match self.provider.complete(&self.session.messages()) {
+            let response = match self
+                .provider
+                .complete(&self.session.messages(), &self.get_route())
+            {
                 Ok(r) => r,
                 Err(e) => {
                     if empty_response_retries >= self.options.max_provider_retries {
@@ -494,7 +509,18 @@ impl Agent {
                                     continue;
                                 }
                             }
+                            if let Some(block_msg) = self.check_planning_gate(&name, None) {
+                                self.session.add_message(Message::tool_request(
+                                    id.clone(),
+                                    name.clone(),
+                                    args,
+                                ));
+                                self.session
+                                    .add_message(Message::tool_result(id, block_msg));
+                                continue;
+                            }
                             let result = external_tool.execute(&args, &tool_ctx);
+                            *self.external_tool_ran.borrow_mut() = true;
                             self.session.add_message(Message::tool_request(
                                 id.clone(),
                                 name.clone(),
@@ -646,7 +672,18 @@ impl Agent {
                                         continue;
                                     }
                                 }
+                                if let Some(block_msg) = self.check_planning_gate(&name, None) {
+                                    self.session.add_message(Message::tool_request(
+                                        id.clone(),
+                                        name.clone(),
+                                        args.clone(),
+                                    ));
+                                    self.session
+                                        .add_message(Message::tool_result(id, block_msg));
+                                    continue;
+                                }
                                 let result = external_tool.execute(&args, &tool_ctx);
+                                *self.external_tool_ran.borrow_mut() = true;
                                 self.session.add_message(Message::tool_request(
                                     id.clone(),
                                     name.clone(),
@@ -765,12 +802,13 @@ impl Agent {
 
     fn build_proof_of_work(&self, response: &str, workspace_root: &Path) -> String {
         let files = self.changed_files.borrow().clone();
-        if files.is_empty() && self.bash_history.borrow().is_empty() {
+        let external_tool_ran = *self.external_tool_ran.borrow();
+        if files.is_empty() && self.bash_history.borrow().is_empty() && !external_tool_ran {
             return response.to_string();
         }
 
         let diff_summary = if !files.is_empty() {
-            Self::generate_diff_summary(workspace_root)
+            Self::generate_diff_summary(workspace_root, &files)
         } else {
             String::new()
         };
@@ -796,6 +834,12 @@ impl Agent {
             }
         }
 
+        if external_tool_ran {
+            evidence.unresolved_issues.push(
+                "External/tools were used - file changes may not be fully tracked".to_string(),
+            );
+        }
+
         if !files.is_empty() && evidence.verification_commands_run.is_empty() {
             evidence
                 .unresolved_issues
@@ -811,23 +855,35 @@ impl Agent {
         task_result.format_proof_of_work()
     }
 
-    fn generate_diff_summary(workspace_root: &Path) -> String {
-        let output = std::process::Command::new("git")
-            .args(["diff", "--stat"])
-            .current_dir(workspace_root)
-            .output();
+    fn generate_diff_summary(workspace_root: &Path, changed_files: &[String]) -> String {
+        if changed_files.is_empty() {
+            return String::new();
+        }
+        let mut summary_parts = Vec::new();
+        for file in changed_files {
+            let output = std::process::Command::new("git")
+                .args(["diff", "--stat", file])
+                .current_dir(workspace_root)
+                .output();
 
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                if stdout.trim().is_empty() {
-                    String::from_utf8_lossy(&out.stderr).to_string()
-                } else {
-                    stdout.to_string()
+            match output {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if !stdout.trim().is_empty() {
+                        summary_parts.push(stdout.to_string());
+                    } else if !stderr.trim().is_empty() {
+                        summary_parts.push(format!("{}: (no diff)", file));
+                    } else {
+                        summary_parts.push(format!("{}: (unchanged)", file));
+                    }
+                }
+                Err(e) => {
+                    summary_parts.push(format!("{}: (diff unavailable: {})", file, e));
                 }
             }
-            Err(e) => format!("(diff unavailable: {})", e),
         }
+        summary_parts.join("\n")
     }
 }
 

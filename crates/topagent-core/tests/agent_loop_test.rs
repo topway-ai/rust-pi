@@ -50,7 +50,11 @@ impl TransientFailProvider {
 }
 
 impl Provider for TransientFailProvider {
-    fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+    fn complete(
+        &self,
+        _messages: &[Message],
+        _route: &topagent_core::ModelRoute,
+    ) -> topagent_core::Result<ProviderResponse> {
         let mut fail_count = self.fail_count.write().unwrap();
         if *fail_count > 0 {
             *fail_count -= 1;
@@ -83,7 +87,11 @@ impl EmptyResponseProvider {
 }
 
 impl Provider for EmptyResponseProvider {
-    fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+    fn complete(
+        &self,
+        _messages: &[Message],
+        _route: &topagent_core::ModelRoute,
+    ) -> topagent_core::Result<ProviderResponse> {
         let mut remaining = self.remaining.write().unwrap();
         if *remaining > 0 {
             *remaining -= 1;
@@ -102,7 +110,11 @@ impl Provider for EmptyResponseProvider {
 struct RunawayProvider;
 
 impl Provider for RunawayProvider {
-    fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+    fn complete(
+        &self,
+        _messages: &[Message],
+        _route: &topagent_core::ModelRoute,
+    ) -> topagent_core::Result<ProviderResponse> {
         Ok(ProviderResponse::ToolCall {
             id: "1".into(),
             name: "bash".into(),
@@ -124,7 +136,11 @@ impl MalformedArgsProvider {
 }
 
 impl Provider for MalformedArgsProvider {
-    fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+    fn complete(
+        &self,
+        _messages: &[Message],
+        _route: &topagent_core::ModelRoute,
+    ) -> topagent_core::Result<ProviderResponse> {
         let mut remaining = self.remaining.write().unwrap();
         if *remaining > 0 {
             *remaining -= 1;
@@ -285,7 +301,11 @@ fn test_agent_unknown_tool_produces_error_message() {
         }
     }
     impl Provider for UnknownToolProvider {
-        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+        fn complete(
+            &self,
+            _messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
             let mut remaining = self.remaining.write().unwrap();
             if *remaining > 0 {
                 *remaining -= 1;
@@ -373,7 +393,11 @@ fn test_agent_loads_commands_from_workspace() {
 
     struct TestProvider;
     impl Provider for TestProvider {
-        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+        fn complete(
+            &self,
+            _messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::Message(Message::assistant("done")))
         }
     }
@@ -395,7 +419,11 @@ fn test_agent_commands_json_missing_is_ok() {
 
     struct TestProvider;
     impl Provider for TestProvider {
-        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+        fn complete(
+            &self,
+            _messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::Message(Message::assistant("done")))
         }
     }
@@ -416,7 +444,11 @@ fn test_repeated_runs_do_not_duplicate_genesis_tools() {
 
     struct TestProvider;
     impl Provider for TestProvider {
-        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+        fn complete(
+            &self,
+            _messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::Message(Message::assistant("done")))
         }
     }
@@ -482,7 +514,11 @@ fn test_genesis_tools_become_external_after_verification() {
 
     struct TestProvider;
     impl Provider for TestProvider {
-        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+        fn complete(
+            &self,
+            _messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::Message(Message::assistant("done")))
         }
     }
@@ -508,7 +544,11 @@ fn test_agent_commands_json_invalid_fails() {
 
     struct TestProvider;
     impl Provider for TestProvider {
-        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+        fn complete(
+            &self,
+            _messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::Message(Message::assistant("done")))
         }
     }
@@ -590,7 +630,11 @@ fn test_agent_multi_tool_batch_counts_steps() {
 
     struct MultiToolProvider;
     impl Provider for MultiToolProvider {
-        fn complete(&self, _messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+        fn complete(
+            &self,
+            _messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
             Ok(ProviderResponse::ToolCalls(vec![
                 ToolCallEntry {
                     id: "1".into(),
@@ -637,7 +681,11 @@ fn test_no_pi_md_includes_absence_note() {
         }
     }
     impl Provider for CheckPromptProvider {
-        fn complete(&self, messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+        fn complete(
+            &self,
+            messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
             let mut captured = self.captured_messages.write().unwrap();
             captured.extend(messages.to_vec());
             Ok(ProviderResponse::Message(Message::assistant("done")))
@@ -678,7 +726,11 @@ fn test_topagent_md_loaded_when_present() {
         }
     }
     impl Provider for CheckPromptProvider {
-        fn complete(&self, messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+        fn complete(
+            &self,
+            messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
             let mut captured = self.captured_messages.write().unwrap();
             captured.extend(messages.to_vec());
             Ok(ProviderResponse::Message(Message::assistant("done")))
@@ -873,7 +925,11 @@ fn test_verification_section_in_system_prompt() {
         }
     }
     impl Provider for CheckPromptProvider {
-        fn complete(&self, messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+        fn complete(
+            &self,
+            messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
             let mut captured = self.captured_messages.write().unwrap();
             captured.extend(messages.to_vec());
             Ok(ProviderResponse::Message(Message::assistant("done")))
@@ -1133,6 +1189,79 @@ fn test_unknown_bash_blocked_before_plan() {
     );
 }
 
+#[test]
+fn test_unsafe_bash_allowed_after_plan_exists() {
+    let (ctx, _temp) = make_test_context();
+    let options = RuntimeOptions::new().with_require_plan(true);
+    let provider = BasicTestProvider::new(vec![
+        ProviderResponse::ToolCall {
+            id: "1".to_string(),
+            name: "update_plan".to_string(),
+            args: serde_json::json!({"items": [{"id": 0, "description": "Step 1", "status": "done"}]}),
+        },
+        ProviderResponse::ToolCall {
+            id: "2".to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": "rm -rf src"}),
+        },
+        ProviderResponse::Message(Message::assistant("Done".to_string())),
+    ]);
+    let mut agent = Agent::with_options(Box::new(provider), make_tools(), options);
+    let result = agent.run(&ctx, "refactor the entire codebase");
+    assert!(result.is_ok());
+    let output = result.unwrap();
+    assert!(output.contains("Done"));
+}
+
+#[test]
+fn test_external_tool_blocked_before_plan() {
+    let temp = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join("commands.json"),
+        r#"[{"name": "my_tool", "description": "test", "command": "echo", "argv_template": ["hello"]}]"#
+    ).unwrap();
+    std::fs::write(temp.path().join("test.txt"), "content").unwrap();
+
+    let root = temp.path().to_path_buf();
+    let ctx = ExecutionContext::new(root);
+
+    let options = RuntimeOptions::new().with_require_plan(true);
+    let provider = BasicTestProvider::new(vec![
+        ProviderResponse::ToolCall {
+            id: "1".to_string(),
+            name: "my_tool".to_string(),
+            args: serde_json::json!({}),
+        },
+        ProviderResponse::Message(Message::assistant("Done".to_string())),
+    ]);
+    let mut agent = Agent::with_options(Box::new(provider), make_tools(), options);
+    let result = agent.run(&ctx, "refactor the entire codebase");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_read_only_task_no_file_change_evidence() {
+    let (ctx, _temp) = make_test_context();
+    std::fs::write(ctx.resolve_path("test.txt").unwrap(), "hello").unwrap();
+
+    let responses = vec![
+        ProviderResponse::ToolCall {
+            id: "1".to_string(),
+            name: "read".to_string(),
+            args: serde_json::json!({"path": "test.txt"}),
+        },
+        ProviderResponse::Message(Message::assistant("File contains hello".to_string())),
+    ];
+    let provider = topagent_core::ScriptedProvider::new(responses);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+
+    let result = agent.run(&ctx, "read the file");
+    assert!(result.is_ok());
+    let output = result.unwrap();
+    assert!(output.contains("File contains hello"));
+    assert!(!output.contains("Files Changed"));
+}
+
 struct BasicTestProvider {
     responses: Vec<ProviderResponse>,
     idx: Arc<RwLock<usize>>,
@@ -1148,7 +1277,11 @@ impl BasicTestProvider {
 }
 
 impl Provider for BasicTestProvider {
-    fn complete(&self, _messages: &[Message]) -> Result<ProviderResponse, Error> {
+    fn complete(
+        &self,
+        _messages: &[Message],
+        _route: &topagent_core::ModelRoute,
+    ) -> Result<ProviderResponse, Error> {
         let mut idx = self.idx.write().unwrap();
         if *idx < self.responses.len() {
             let resp = self.responses[*idx].clone();

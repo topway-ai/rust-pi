@@ -39,7 +39,11 @@ impl RecordingProvider {
 }
 
 impl Provider for RecordingProvider {
-    fn complete(&self, messages: &[Message]) -> topagent_core::Result<ProviderResponse> {
+    fn complete(
+        &self,
+        messages: &[Message],
+        _route: &topagent_core::ModelRoute,
+    ) -> topagent_core::Result<ProviderResponse> {
         {
             let mut recorded = self.recorded_messages.lock().unwrap();
             recorded.extend(messages.iter().cloned());
