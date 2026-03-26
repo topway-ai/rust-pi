@@ -1027,6 +1027,112 @@ fn test_trivial_task_not_blocked() {
     assert!(result.is_ok());
 }
 
+#[test]
+fn test_safe_bash_allowed_before_plan() {
+    use topagent_core::Agent;
+    use topagent_core::BashCommandClass;
+
+    assert_eq!(
+        Agent::classify_bash_command("ls -la"),
+        BashCommandClass::ResearchSafe
+    );
+    assert_eq!(
+        Agent::classify_bash_command("git status"),
+        BashCommandClass::ResearchSafe
+    );
+    assert_eq!(
+        Agent::classify_bash_command("rg 'fn main' src/"),
+        BashCommandClass::ResearchSafe
+    );
+    assert_eq!(
+        Agent::classify_bash_command("find . -name '*.rs'"),
+        BashCommandClass::ResearchSafe
+    );
+}
+
+#[test]
+fn test_unsafe_bash_blocked_before_plan() {
+    let (ctx, _temp) = make_test_context();
+    let options = RuntimeOptions::new().with_require_plan(true);
+    let provider = BasicTestProvider::new(vec![
+        ProviderResponse::ToolCall {
+            id: "1".to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": "rm -rf src"}),
+        },
+        ProviderResponse::ToolCall {
+            id: "2".to_string(),
+            name: "update_plan".to_string(),
+            args: serde_json::json!({"items": [{"id": 0, "description": "Step 1", "status": "done"}]}),
+        },
+        ProviderResponse::Message(Message::assistant("Done".to_string())),
+    ]);
+    let mut agent = Agent::with_options(Box::new(provider), make_tools(), options);
+    let result = agent.run(&ctx, "refactor the entire codebase");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_verification_bash_allowed_before_plan() {
+    use topagent_core::Agent;
+    use topagent_core::BashCommandClass;
+
+    assert_eq!(
+        Agent::classify_bash_command("cargo test"),
+        BashCommandClass::Verification
+    );
+    assert_eq!(
+        Agent::classify_bash_command("cargo build"),
+        BashCommandClass::Verification
+    );
+    assert_eq!(
+        Agent::classify_bash_command("cargo clippy"),
+        BashCommandClass::Verification
+    );
+}
+
+#[test]
+fn test_verification_bash_with_flags_allowed_before_plan() {
+    use topagent_core::Agent;
+    use topagent_core::BashCommandClass;
+
+    assert_eq!(
+        Agent::classify_bash_command("cargo test --lib"),
+        BashCommandClass::Verification
+    );
+    assert_eq!(
+        Agent::classify_bash_command("cargo build --release"),
+        BashCommandClass::Verification
+    );
+    assert_eq!(
+        Agent::classify_bash_command("cargo test -- --test-threads=1"),
+        BashCommandClass::Verification
+    );
+    assert_eq!(
+        Agent::classify_bash_command("npm test -- --coverage"),
+        BashCommandClass::Verification
+    );
+    assert_eq!(
+        Agent::classify_bash_command("go test -v ./..."),
+        BashCommandClass::Verification
+    );
+    assert_eq!(
+        Agent::classify_bash_command("make verify"),
+        BashCommandClass::Verification
+    );
+}
+
+#[test]
+fn test_unknown_bash_blocked_before_plan() {
+    use topagent_core::Agent;
+    use topagent_core::BashCommandClass;
+
+    assert_eq!(
+        Agent::classify_bash_command("some_unknown_command"),
+        BashCommandClass::MutationRisk
+    );
+}
+
 struct BasicTestProvider {
     responses: Vec<ProviderResponse>,
     idx: Arc<RwLock<usize>>,

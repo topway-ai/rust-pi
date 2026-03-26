@@ -21,7 +21,7 @@ pub mod tool_genesis;
 pub mod tool_spec;
 pub mod tools;
 
-pub use agent::Agent;
+pub use agent::{Agent, BashCommandClass, ExecutionStage};
 pub use channel::adapter::{ChannelAdapter, ChannelError, IncomingMessage, OutgoingMessage};
 pub use channel::telegram::TelegramAdapter;
 pub use context::ExecutionContext;

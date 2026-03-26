@@ -10,6 +10,9 @@ pub struct RuntimeOptions {
     pub max_messages_before_truncation: usize,
     pub require_plan: bool,
     pub task_category: TaskCategory,
+    pub research_model: Option<String>,
+    pub edit_model: Option<String>,
+    pub review_model: Option<String>,
 }
 
 impl Default for RuntimeOptions {
@@ -23,6 +26,9 @@ impl Default for RuntimeOptions {
             max_messages_before_truncation: 100,
             require_plan: true,
             task_category: TaskCategory::Default,
+            research_model: None,
+            edit_model: None,
+            review_model: None,
         }
     }
 }
@@ -72,6 +78,21 @@ impl RuntimeOptions {
 
     pub fn with_task_category(mut self, task_category: TaskCategory) -> Self {
         self.task_category = task_category;
+        self
+    }
+
+    pub fn with_research_model(mut self, model: String) -> Self {
+        self.research_model = Some(model);
+        self
+    }
+
+    pub fn with_edit_model(mut self, model: String) -> Self {
+        self.edit_model = Some(model);
+        self
+    }
+
+    pub fn with_review_model(mut self, model: String) -> Self {
+        self.review_model = Some(model);
         self
     }
 }

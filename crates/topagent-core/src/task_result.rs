@@ -50,6 +50,16 @@ impl TaskResult {
         self
     }
 
+    pub fn with_unresolved_issues(mut self, issues: Vec<String>) -> Self {
+        self.evidence.unresolved_issues.extend(issues);
+        self
+    }
+
+    pub fn with_diff_summary(mut self, summary: String) -> Self {
+        self.evidence.diff_summary = summary;
+        self
+    }
+
     pub fn format_proof_of_work(&self) -> String {
         let mut output = String::new();
 

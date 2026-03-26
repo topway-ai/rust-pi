@@ -32,6 +32,22 @@ pub struct Agent {
     bash_history: RefCell<Vec<(String, String, i32)>>,
     planning_gate_active: bool,
     resolved_route: ModelRoute,
+    execution_stage: ExecutionStage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecutionStage {
+    #[default]
+    Research,
+    Edit,
+    Review,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BashCommandClass {
+    ResearchSafe,
+    MutationRisk,
+    Verification,
 }
 
 impl Agent {
@@ -83,6 +99,7 @@ impl Agent {
             bash_history: RefCell::new(Vec::new()),
             planning_gate_active: false,
             resolved_route,
+            execution_stage: ExecutionStage::Research,
         }
     }
 
@@ -143,24 +160,119 @@ impl Agent {
     }
 
     pub fn get_route(&self) -> ModelRoute {
+        if self.planning_gate_active {
+            if let Some(ref model) = self.options.research_model {
+                return ModelRoute::openrouter(model);
+            }
+        }
+        match self.execution_stage {
+            ExecutionStage::Edit => {
+                if let Some(ref model) = self.options.edit_model {
+                    return ModelRoute::openrouter(model);
+                }
+            }
+            ExecutionStage::Review => {
+                if let Some(ref model) = self.options.review_model {
+                    return ModelRoute::openrouter(model);
+                }
+            }
+            ExecutionStage::Research => {}
+        }
         self.resolved_route.clone()
     }
 
+    pub fn set_execution_stage(&mut self, stage: ExecutionStage) {
+        self.execution_stage = stage;
+    }
+
     fn is_mutation_tool(name: &str) -> bool {
-        matches!(name, "write" | "edit" | "bash" | "git_commit" | "git_add")
+        matches!(name, "write" | "edit" | "git_commit" | "git_add")
     }
 
     fn is_plan_tool(name: &str) -> bool {
         matches!(name, "update_plan" | "save_plan")
     }
 
-    fn check_planning_gate(&self, tool_name: &str) -> Option<String> {
+    pub fn classify_bash_command(cmd: &str) -> BashCommandClass {
+        let trimmed = cmd.trim();
+        let lower = trimmed.to_lowercase();
+
+        if Self::is_verification_command(trimmed) {
+            return BashCommandClass::Verification;
+        }
+
+        let research_safe_prefixes = [
+            "ls ",
+            "ls-",
+            "pwd",
+            "find ",
+            "find -",
+            "rg ",
+            "rg -",
+            "grep ",
+            "grep -",
+            "cat ",
+            "head ",
+            "tail ",
+            "wc ",
+            "cut ",
+            "sort ",
+            "uniq ",
+            "diff ",
+            "git status",
+            "git diff",
+            "git log ",
+            "git show",
+            "git blame",
+            "git branch",
+            "git remote",
+            "git stash list",
+            "echo ",
+            "printf ",
+            "true",
+            "false",
+        ];
+
+        for prefix in research_safe_prefixes {
+            if lower.starts_with(prefix) || lower == prefix.trim_end_matches(' ') {
+                return BashCommandClass::ResearchSafe;
+            }
+        }
+
+        BashCommandClass::MutationRisk
+    }
+
+    fn check_planning_gate(
+        &self,
+        tool_name: &str,
+        bash_args: Option<&serde_json::Value>,
+    ) -> Option<String> {
         if !self.planning_gate_active {
             return None;
         }
         if Self::is_plan_tool(tool_name) {
             return None;
         }
+
+        if tool_name == "bash" {
+            if let Some(args) = bash_args {
+                if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
+                    let class = Self::classify_bash_command(cmd);
+                    if class == BashCommandClass::ResearchSafe {
+                        return None;
+                    }
+                }
+            }
+            if bash_args.is_none() {
+                return Some(
+                    "Planning required for this task. Please create a plan using update_plan before running bash commands.".to_string(),
+                );
+            }
+            return Some(
+                "Planning required for this task. Use update_plan to create a plan before mutation commands.".to_string(),
+            );
+        }
+
         if !Self::is_mutation_tool(tool_name) {
             return None;
         }
@@ -177,14 +289,55 @@ impl Agent {
 
     fn is_verification_command(cmd: &str) -> bool {
         let lower = cmd.to_lowercase();
-        lower.contains("test")
-            || lower.contains("build")
-            || lower.contains("check")
-            || lower.contains("verify")
-            || lower.contains("lint")
-            || lower.contains("clippy")
-            || lower.contains("fmt")
-            || lower.contains("format")
+
+        if lower.starts_with("cargo test")
+            || lower.starts_with("cargo build")
+            || lower.starts_with("cargo check")
+            || lower.starts_with("cargo clippy")
+            || lower.starts_with("cargo fmt")
+            || lower.starts_with("cargo watch")
+            || lower.starts_with("cargo auditable")
+            || lower.starts_with("pytest")
+            || lower.starts_with("py.test")
+            || lower.starts_with("make test")
+            || lower.starts_with("make check")
+            || lower.starts_with("make verify")
+            || lower.starts_with("npm test")
+            || lower.starts_with("npm run test")
+            || lower.starts_with("npm run build")
+            || lower.starts_with("npm run check")
+            || lower.starts_with("go test")
+            || lower.starts_with("go build")
+            || lower.starts_with("go vet")
+            || lower.starts_with("rustfmt")
+            || lower.starts_with("rust-analyzer")
+            || lower.starts_with("clippy")
+            || lower.starts_with("deny ")
+            || lower.starts_with("audit ")
+            || lower.starts_with("cargo deny")
+            || lower.starts_with("cargo audit")
+        {
+            return true;
+        }
+
+        if lower.contains(" --verify") || lower.contains(" --check") {
+            return true;
+        }
+
+        if lower.ends_with(" --test") || lower.ends_with(" --tests") {
+            return true;
+        }
+
+        if lower.contains("verify") || lower.contains("lint") && !lower.contains("git") {
+            let verification_indicators = ["test", "build", "check", "lint", "fmt", "audit", "vet"];
+            for indicator in verification_indicators {
+                if lower.contains(indicator) {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     fn extract_bash_command(args: &serde_json::Value) -> String {
@@ -265,7 +418,6 @@ impl Agent {
 
         self.session.set_system_prompt(&system_prompt);
 
-        let tool_ctx = ToolContext::new(ctx, &self.options);
         let mut steps = 0;
         let mut empty_response_retries = 0;
 
@@ -313,12 +465,13 @@ impl Agent {
                             continue;
                         }
                         self.session.add_message(msg);
-                        let final_response = self.build_proof_of_work(&text);
+                        let final_response = self.build_proof_of_work(&text, &ctx.workspace_root);
                         return Ok(final_response);
                     }
                     self.session.add_message(msg);
                 }
                 ProviderResponse::ToolCall { id, name, args } => {
+                    let tool_ctx = ToolContext::new(ctx, &self.options);
                     let is_external = self.external_tools.get(&name).is_some();
                     let tool = match self.tools.get(&name) {
                         Some(t) => t,
@@ -405,7 +558,8 @@ impl Agent {
                         }
                     }
 
-                    if let Some(block_msg) = self.check_planning_gate(&name) {
+                    let bash_args = if name == "bash" { Some(&args) } else { None };
+                    if let Some(block_msg) = self.check_planning_gate(&name, bash_args) {
                         self.session.add_message(Message::tool_request(
                             id.clone(),
                             name.clone(),
@@ -466,6 +620,7 @@ impl Agent {
                 }
                 ProviderResponse::ToolCalls(calls) => {
                     for call in calls {
+                        let tool_ctx = ToolContext::new(ctx, &self.options);
                         let id = call.id;
                         let name = call.name;
                         let args = call.args;
@@ -540,7 +695,8 @@ impl Agent {
                             }
                         }
 
-                        if let Some(block_msg) = self.check_planning_gate(&name) {
+                        let bash_args = if name == "bash" { Some(&args) } else { None };
+                        if let Some(block_msg) = self.check_planning_gate(&name, bash_args) {
                             self.session.add_message(Message::tool_request(
                                 id.clone(),
                                 name.clone(),
@@ -607,15 +763,21 @@ impl Agent {
         }
     }
 
-    fn build_proof_of_work(&self, response: &str) -> String {
+    fn build_proof_of_work(&self, response: &str, workspace_root: &Path) -> String {
         let files = self.changed_files.borrow().clone();
         if files.is_empty() && self.bash_history.borrow().is_empty() {
             return response.to_string();
         }
 
+        let diff_summary = if !files.is_empty() {
+            Self::generate_diff_summary(workspace_root)
+        } else {
+            String::new()
+        };
+
         let mut evidence = TaskEvidence {
-            files_changed: files,
-            diff_summary: String::new(),
+            files_changed: files.clone(),
+            diff_summary,
             verification_commands_run: Vec::new(),
             unresolved_issues: Vec::new(),
         };
@@ -634,11 +796,38 @@ impl Agent {
             }
         }
 
+        if !files.is_empty() && evidence.verification_commands_run.is_empty() {
+            evidence
+                .unresolved_issues
+                .push("Files were modified but no verification commands were run".to_string());
+        }
+
         let task_result = TaskResult::new(response.to_string())
             .with_files_changed(evidence.files_changed.clone())
-            .with_verification_commands(evidence.verification_commands_run.clone());
+            .with_diff_summary(evidence.diff_summary.clone())
+            .with_verification_commands(evidence.verification_commands_run.clone())
+            .with_unresolved_issues(evidence.unresolved_issues.clone());
 
         task_result.format_proof_of_work()
+    }
+
+    fn generate_diff_summary(workspace_root: &Path) -> String {
+        let output = std::process::Command::new("git")
+            .args(["diff", "--stat"])
+            .current_dir(workspace_root)
+            .output();
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if stdout.trim().is_empty() {
+                    String::from_utf8_lossy(&out.stderr).to_string()
+                } else {
+                    stdout.to_string()
+                }
+            }
+            Err(e) => format!("(diff unavailable: {})", e),
+        }
     }
 }
 
