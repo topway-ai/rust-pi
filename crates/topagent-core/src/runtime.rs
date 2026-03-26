@@ -1,3 +1,5 @@
+use crate::model::TaskCategory;
+
 #[derive(Debug, Clone)]
 pub struct RuntimeOptions {
     pub max_steps: usize,
@@ -6,6 +8,8 @@ pub struct RuntimeOptions {
     pub max_bash_output_bytes: usize,
     pub provider_timeout_secs: u64,
     pub max_messages_before_truncation: usize,
+    pub require_plan: bool,
+    pub task_category: TaskCategory,
 }
 
 impl Default for RuntimeOptions {
@@ -17,6 +21,8 @@ impl Default for RuntimeOptions {
             max_bash_output_bytes: 64 * 1024,
             provider_timeout_secs: 120,
             max_messages_before_truncation: 100,
+            require_plan: true,
+            task_category: TaskCategory::Default,
         }
     }
 }
@@ -56,6 +62,16 @@ impl RuntimeOptions {
         max_messages_before_truncation: usize,
     ) -> Self {
         self.max_messages_before_truncation = max_messages_before_truncation;
+        self
+    }
+
+    pub fn with_require_plan(mut self, require_plan: bool) -> Self {
+        self.require_plan = require_plan;
+        self
+    }
+
+    pub fn with_task_category(mut self, task_category: TaskCategory) -> Self {
+        self.task_category = task_category;
         self
     }
 }

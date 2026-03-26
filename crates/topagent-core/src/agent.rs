@@ -1,11 +1,12 @@
 use crate::context::{ExecutionContext, ToolContext};
 use crate::external::ExternalToolRegistry;
 use crate::hooks::HookRegistry;
-use crate::plan::Plan;
+use crate::plan::{should_require_research_plan_build, Plan};
 use crate::project::get_project_instructions_or_error;
 use crate::prompt;
 use crate::runtime::RuntimeOptions;
 use crate::session::Session;
+use crate::task_result::{TaskEvidence, TaskResult, VerificationCommand};
 use crate::tool_genesis::{
     ApproveToolProposalTool, CreateToolTool, DeleteGeneratedToolTool, DesignToolTool,
     ImplementToolProposalTool, ListGeneratedToolsTool, ListToolProposalsTool,
@@ -27,6 +28,7 @@ pub struct Agent {
     plan: Arc<Mutex<Plan>>,
     hooks: HookRegistry,
     changed_files: RefCell<Vec<String>>,
+    bash_history: RefCell<Vec<(String, String, i32)>>,
 }
 
 impl Agent {
@@ -74,6 +76,7 @@ impl Agent {
             plan,
             hooks: HookRegistry::new(),
             changed_files: RefCell::new(Vec::new()),
+            bash_history: RefCell::new(Vec::new()),
         }
     }
 
@@ -185,6 +188,20 @@ impl Agent {
             }
         }
 
+        if self.options.require_plan && should_require_research_plan_build(instruction) {
+            if let Ok(plan) = self.plan.lock() {
+                if plan.is_empty() {
+                    system_prompt.push_str(
+                        "\n## Planning Required\n\n\
+                        This task is non-trivial. Before making changes:\n\
+                        1. Research: inspect relevant files and git context\n\
+                        2. Plan: use update_plan to create a plan with clear steps\n\
+                        3. Build: execute plan items, updating status as you complete each step\n\n",
+                    );
+                }
+            }
+        }
+
         self.session.set_system_prompt(&system_prompt);
 
         let tool_ctx = ToolContext::new(ctx, &self.options);
@@ -235,7 +252,8 @@ impl Agent {
                             continue;
                         }
                         self.session.add_message(msg);
-                        return Ok(text);
+                        let final_response = self.build_proof_of_work(&text);
+                        return Ok(final_response);
                     }
                     self.session.add_message(msg);
                 }
@@ -343,6 +361,17 @@ impl Agent {
                         }
                     };
 
+                    if name == "bash" {
+                        if let Ok(output) = parse_bash_output(&result) {
+                            let exit_code = extract_exit_code(&result);
+                            self.bash_history.borrow_mut().push((
+                                output,
+                                result.clone(),
+                                exit_code,
+                            ));
+                        }
+                    }
+
                     if let Some(hooks) = self.hooks.get(&name) {
                         result = hooks.run_post_hooks(&name, &args, &result, &tool_ctx);
                     }
@@ -375,7 +404,7 @@ impl Agent {
                                         self.session.add_message(Message::tool_request(
                                             id.clone(),
                                             name.clone(),
-                                            args,
+                                            args.clone(),
                                         ));
                                         self.session.add_message(Message::tool_result(
                                             id,
@@ -391,7 +420,7 @@ impl Agent {
                                 self.session.add_message(Message::tool_request(
                                     id.clone(),
                                     name.clone(),
-                                    args,
+                                    args.clone(),
                                 ));
                                 let result_str = match result {
                                     Ok(r) => r,
@@ -411,7 +440,7 @@ impl Agent {
                                 self.session.add_message(Message::tool_request(
                                     id.clone(),
                                     name.clone(),
-                                    args,
+                                    args.clone(),
                                 ));
                                 self.session.add_message(Message::tool_result(
                                     id,
@@ -426,7 +455,7 @@ impl Agent {
                                 self.session.add_message(Message::tool_request(
                                     id.clone(),
                                     name.clone(),
-                                    args,
+                                    args.clone(),
                                 ));
                                 self.session.add_message(Message::tool_result(
                                     id,
@@ -442,7 +471,7 @@ impl Agent {
                                 self.session.add_message(Message::tool_request(
                                     id.clone(),
                                     name.clone(),
-                                    args,
+                                    args.clone(),
                                 ));
                                 self.session.add_message(Message::tool_result(
                                     id,
@@ -451,6 +480,17 @@ impl Agent {
                                 continue;
                             }
                         };
+
+                        if name == "bash" {
+                            if let Ok(output) = parse_bash_output(&result) {
+                                let exit_code = extract_exit_code(&result);
+                                self.bash_history.borrow_mut().push((
+                                    output,
+                                    result.clone(),
+                                    exit_code,
+                                ));
+                            }
+                        }
 
                         if let Some(hooks) = self.hooks.get(&name) {
                             result = hooks.run_post_hooks(&name, &args, &result, &tool_ctx);
@@ -474,5 +514,66 @@ impl Agent {
                 }
             }
         }
+    }
+
+    fn build_proof_of_work(&self, response: &str) -> String {
+        let files = self.changed_files.borrow().clone();
+        if files.is_empty() && self.bash_history.borrow().is_empty() {
+            return response.to_string();
+        }
+
+        let mut evidence = TaskEvidence {
+            files_changed: files,
+            diff_summary: String::new(),
+            verification_commands_run: Vec::new(),
+            unresolved_issues: Vec::new(),
+        };
+
+        for (output, full_output, exit_code) in self.bash_history.borrow().iter() {
+            let succeeded = exit_code == &0;
+            evidence
+                .verification_commands_run
+                .push(VerificationCommand {
+                    command: output.clone(),
+                    output: full_output.clone(),
+                    exit_code: *exit_code,
+                    succeeded,
+                });
+        }
+
+        let task_result = TaskResult::new(response.to_string())
+            .with_files_changed(evidence.files_changed.clone())
+            .with_verification_commands(evidence.verification_commands_run.clone());
+
+        task_result.format_proof_of_work()
+    }
+}
+
+fn parse_bash_output(result: &str) -> Result<String> {
+    let prefix = "Output: ";
+    if let Some(pos) = result.find(prefix) {
+        let after_prefix = &result[pos + prefix.len()..];
+        if let Some(end) = after_prefix.find("\nExit code:") {
+            Ok(after_prefix[..end].trim().to_string())
+        } else {
+            Ok(after_prefix.trim().to_string())
+        }
+    } else {
+        Ok(result.lines().next().unwrap_or("").to_string())
+    }
+}
+
+fn extract_exit_code(result: &str) -> i32 {
+    let prefix = "\nExit code: ";
+    if let Some(pos) = result.find(prefix) {
+        let after_prefix = &result[pos + prefix.len()..];
+        after_prefix
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '-')
+            .collect::<String>()
+            .parse()
+            .unwrap_or(-1)
+    } else {
+        0
     }
 }

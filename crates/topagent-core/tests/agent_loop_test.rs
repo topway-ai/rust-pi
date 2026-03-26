@@ -2,8 +2,9 @@ use std::sync::{Arc, RwLock};
 use tempfile::TempDir;
 use topagent_core::{
     context::ExecutionContext,
+    model::TaskCategory,
     tools::{BashTool, EditTool, GitDiffTool, ReadTool, Tool, WriteTool},
-    Agent, Content, Error, Message, Provider, ProviderResponse, Role, RuntimeOptions,
+    Agent, Content, Error, Message, Provider, ProviderResponse, Role, RuntimeOptions, TaskResult,
     ToolCallEntry,
 };
 
@@ -889,4 +890,69 @@ fn test_verification_section_in_system_prompt() {
         "expected verification section or git_diff mention in system prompt: {}",
         system_prompt
     );
+}
+
+#[test]
+fn test_runtime_options_defaults_include_require_plan() {
+    let options = RuntimeOptions::default();
+    assert!(options.require_plan, "require_plan should default to true");
+    assert_eq!(options.task_category, TaskCategory::Default);
+}
+
+#[test]
+fn test_runtime_options_builder_with_require_plan() {
+    let options = RuntimeOptions::new().with_require_plan(false);
+    assert!(!options.require_plan);
+}
+
+#[test]
+fn test_runtime_options_builder_with_task_category() {
+    let options = RuntimeOptions::new().with_task_category(TaskCategory::EditMutation);
+    assert_eq!(options.task_category, TaskCategory::EditMutation);
+}
+
+#[test]
+fn test_task_result_format_no_evidence() {
+    let result = TaskResult::new("Task completed".to_string());
+    let formatted = result.format_proof_of_work();
+    assert_eq!(formatted, "Task completed");
+}
+
+#[test]
+fn test_task_result_format_with_files_changed() {
+    let result =
+        TaskResult::new("Edit done".to_string()).with_files_changed(vec!["src/lib.rs".to_string()]);
+    let formatted = result.format_proof_of_work();
+    assert!(formatted.contains("src/lib.rs"));
+    assert!(formatted.contains("Files Changed"));
+}
+
+#[test]
+fn test_task_result_format_with_verification_commands() {
+    use topagent_core::task_result::VerificationCommand;
+    let cmd = VerificationCommand {
+        command: "cargo test".to_string(),
+        output: "test result: ok".to_string(),
+        exit_code: 0,
+        succeeded: true,
+    };
+    let result = TaskResult::new("Tests passed".to_string()).with_verification_command(cmd);
+    let formatted = result.format_proof_of_work();
+    assert!(formatted.contains("Verification"));
+    assert!(formatted.contains("PASS"));
+}
+
+#[test]
+fn test_task_result_format_with_failed_verification() {
+    use topagent_core::task_result::VerificationCommand;
+    let cmd = VerificationCommand {
+        command: "cargo build".to_string(),
+        output: "error: build failed".to_string(),
+        exit_code: 1,
+        succeeded: false,
+    };
+    let result = TaskResult::new("Build failed".to_string()).with_verification_command(cmd);
+    let formatted = result.format_proof_of_work();
+    assert!(formatted.contains("FAIL"));
+    assert!(formatted.contains("error: build failed"));
 }
