@@ -91,7 +91,8 @@ impl TaskResult {
         if !self.evidence.verification_commands_run.is_empty() {
             output.push_str("### Verification\n\n");
             for vc in &self.evidence.verification_commands_run {
-                let status = if vc.succeeded { "PASS" } else { "FAIL" };
+                // Derive verdict from exit code — the single source of truth.
+                let status = if vc.exit_code == 0 { "PASS" } else { "FAIL" };
                 output.push_str(&format!(
                     "- `{}` → exit {} ({})\n",
                     vc.command, vc.exit_code, status
@@ -102,6 +103,9 @@ impl TaskResult {
                     output.push_str("\n  ```\n");
                 }
             }
+            output.push_str(&Self::verification_summary(
+                &self.evidence.verification_commands_run,
+            ));
             output.push('\n');
         }
 
@@ -114,6 +118,36 @@ impl TaskResult {
         }
 
         output.trim_end_matches('\n').to_string()
+    }
+
+    fn verification_summary(commands: &[VerificationCommand]) -> String {
+        if commands.is_empty() {
+            return String::new();
+        }
+        let total = commands.len();
+        let failed = commands.iter().filter(|c| c.exit_code != 0).count();
+        let last_passed = commands.last().map_or(false, |c| c.exit_code == 0);
+
+        if failed == 0 {
+            if total == 1 {
+                "\nVerification passed.\n".to_string()
+            } else {
+                format!("\nAll {} verification commands passed.\n", total)
+            }
+        } else if last_passed {
+            format!(
+                "\nFinal verification passed after {} failed attempt{}.\n",
+                failed,
+                if failed == 1 { "" } else { "s" }
+            )
+        } else {
+            format!(
+                "\nVerification failed ({} of {} attempt{} failed).\n",
+                failed,
+                total,
+                if total == 1 { "" } else { "s" }
+            )
+        }
     }
 }
 
@@ -189,5 +223,133 @@ mod tests {
         assert!(proof.contains("Files Changed"));
         assert!(proof.contains("Verification"));
         assert!(proof.contains("Unresolved"));
+    }
+
+    // ── Regression: exit_code is the source of truth for labels ──
+
+    #[test]
+    fn test_exit_code_zero_always_renders_pass() {
+        // Regression: even if `succeeded` is somehow false, exit_code 0 must render PASS.
+        let cmd = VerificationCommand {
+            command: "cargo test".to_string(),
+            output: "Finished successfully\nexit status: 0".to_string(),
+            exit_code: 0,
+            succeeded: false, // deliberately wrong — rendering must use exit_code
+        };
+        let result = TaskResult::new("Done".to_string()).with_verification_command(cmd);
+        let proof = result.format_proof_of_work();
+        assert!(
+            proof.contains("PASS"),
+            "exit 0 must be PASS, got: {}",
+            proof
+        );
+        assert!(
+            !proof.contains("FAIL"),
+            "exit 0 must not contain FAIL, got: {}",
+            proof
+        );
+    }
+
+    #[test]
+    fn test_nonzero_exit_always_renders_fail() {
+        let cmd = VerificationCommand {
+            command: "cargo build".to_string(),
+            output: "error[E0001]: something".to_string(),
+            exit_code: 1,
+            succeeded: true, // deliberately wrong — rendering must use exit_code
+        };
+        let result = TaskResult::new("Done".to_string()).with_verification_command(cmd);
+        let proof = result.format_proof_of_work();
+        assert!(
+            proof.contains("FAIL"),
+            "exit 1 must be FAIL, got: {}",
+            proof
+        );
+        assert!(
+            !proof.contains("(PASS)"),
+            "exit 1 must not contain PASS label, got: {}",
+            proof
+        );
+    }
+
+    // ── Verification summary aggregation ──
+
+    #[test]
+    fn test_single_success_summary() {
+        let cmd = VerificationCommand {
+            command: "cargo test".to_string(),
+            output: "ok".to_string(),
+            exit_code: 0,
+            succeeded: true,
+        };
+        let result = TaskResult::new("Done".to_string()).with_verification_command(cmd);
+        let proof = result.format_proof_of_work();
+        assert!(
+            proof.contains("Verification passed."),
+            "single success should say passed, got: {}",
+            proof
+        );
+    }
+
+    #[test]
+    fn test_failure_then_success_summary() {
+        let fail = VerificationCommand {
+            command: "cargo test".to_string(),
+            output: "error".to_string(),
+            exit_code: 1,
+            succeeded: false,
+        };
+        let pass = VerificationCommand {
+            command: "cargo test".to_string(),
+            output: "ok".to_string(),
+            exit_code: 0,
+            succeeded: true,
+        };
+        let result = TaskResult::new("Done".to_string())
+            .with_verification_command(fail)
+            .with_verification_command(pass);
+        let proof = result.format_proof_of_work();
+        assert!(
+            proof.contains("Final verification passed after 1 failed attempt."),
+            "should note recovery, got: {}",
+            proof
+        );
+    }
+
+    #[test]
+    fn test_all_failures_summary() {
+        let fail1 = VerificationCommand {
+            command: "cargo test".to_string(),
+            output: "error".to_string(),
+            exit_code: 1,
+            succeeded: false,
+        };
+        let fail2 = VerificationCommand {
+            command: "cargo test".to_string(),
+            output: "error again".to_string(),
+            exit_code: 1,
+            succeeded: false,
+        };
+        let result = TaskResult::new("Done".to_string())
+            .with_verification_command(fail1)
+            .with_verification_command(fail2);
+        let proof = result.format_proof_of_work();
+        assert!(
+            proof.contains("Verification failed (2 of 2 attempts failed)."),
+            "should report all failed, got: {}",
+            proof
+        );
+    }
+
+    #[test]
+    fn test_no_verification_has_no_summary() {
+        let result =
+            TaskResult::new("Done".to_string()).with_files_changed(vec!["f.rs".to_string()]);
+        let proof = result.format_proof_of_work();
+        assert!(
+            !proof.contains("Verification passed"),
+            "no verification should not claim passed, got: {}",
+            proof
+        );
     }
 }

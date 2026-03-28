@@ -157,7 +157,7 @@ fn format_output_with_limit(output: Output, max_size: usize) -> Result<String> {
         }
         result.push('\n');
     }
-    result.push_str(&format!("Exit code: {}", status));
+    result.push_str(&format!("Exit code: {}", status.code().unwrap_or(-1)));
     Ok(result)
 }
 
@@ -191,7 +191,7 @@ mod tests {
         let tool = BashTool::new();
         let result = tool.execute(serde_json::json!({"command": "exit 1"}), &ctx);
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("exit status:"));
+        assert!(result.unwrap().contains("Exit code: 1"));
     }
 
     #[test]

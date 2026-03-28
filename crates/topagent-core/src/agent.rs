@@ -1400,3 +1400,29 @@ fn extract_exit_code(result: &str) -> i32 {
         0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::extract_exit_code;
+
+    #[test]
+    fn test_extract_exit_code_zero() {
+        assert_eq!(extract_exit_code("Output: hello\nExit code: 0"), 0);
+    }
+
+    #[test]
+    fn test_extract_exit_code_nonzero() {
+        assert_eq!(extract_exit_code("Stderr: err\nExit code: 1"), 1);
+        assert_eq!(extract_exit_code("Output: x\nExit code: 127"), 127);
+    }
+
+    #[test]
+    fn test_extract_exit_code_no_prefix_defaults_to_zero() {
+        assert_eq!(extract_exit_code("some random output"), 0);
+    }
+
+    #[test]
+    fn test_extract_exit_code_negative() {
+        assert_eq!(extract_exit_code("Output: x\nExit code: -1"), -1);
+    }
+}
