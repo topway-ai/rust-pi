@@ -1,32 +1,44 @@
 use super::adapter::{ChannelAdapter, ChannelError, IncomingMessage, OutgoingMessage};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 const TELEGRAM_API_URL: &str = "https://api.telegram.org";
+
+/// Server-side long-poll hold time passed to Telegram's getUpdates.
+pub const POLL_TIMEOUT_SECS: i64 = 30;
+
+/// HTTP timeout for the long-poll client. Must exceed POLL_TIMEOUT_SECS so the
+/// client never kills the connection before Telegram responds to an idle poll.
+const POLL_CLIENT_TIMEOUT_SECS: u64 = POLL_TIMEOUT_SECS as u64 + 15;
+
+/// HTTP timeout for short-lived API calls (sendMessage, editMessageText, etc.).
+const SEND_CLIENT_TIMEOUT_SECS: u64 = 15;
+
+/// Maximum retries for transient HTTP failures on send/edit calls.
+const SEND_MAX_RETRIES: usize = 3;
 
 #[derive(Clone)]
 pub struct TelegramAdapter {
     token: String,
-    client: reqwest::blocking::Client,
+    /// Long-timeout client used exclusively for getUpdates long-polling.
+    poll_client: reqwest::blocking::Client,
+    /// Short-timeout client used for sendMessage, editMessageText, etc.
+    send_client: reqwest::blocking::Client,
+}
+
+fn build_client(timeout_secs: u64) -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .expect("failed to create HTTP client")
 }
 
 impl TelegramAdapter {
     pub fn new(token: impl Into<String>) -> Self {
         Self {
             token: token.into(),
-            client: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to create HTTP client"),
-        }
-    }
-
-    pub fn with_timeout(token: impl Into<String>, timeout_secs: u64) -> Self {
-        Self {
-            token: token.into(),
-            client: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .build()
-                .expect("failed to create HTTP client"),
+            poll_client: build_client(POLL_CLIENT_TIMEOUT_SECS),
+            send_client: build_client(SEND_CLIENT_TIMEOUT_SECS),
         }
     }
 
@@ -36,7 +48,7 @@ impl TelegramAdapter {
 
     pub fn get_me(&self) -> Result<TelegramUser, ChannelError> {
         let response = self
-            .client
+            .send_client
             .get(self.api_url("getMe"))
             .send()?
             .json::<TelegramResponse<TelegramUser>>()?;
@@ -65,12 +77,12 @@ impl TelegramAdapter {
 
         let params = GetUpdatesParams {
             offset,
-            timeout: timeout_secs.or(Some(30)),
+            timeout: timeout_secs.or(Some(POLL_TIMEOUT_SECS)),
             allowed_updates: allowed_updates.map(|u| u.iter().map(|s| s.to_string()).collect()),
         };
 
         let response = self
-            .client
+            .poll_client
             .get(self.api_url("getUpdates"))
             .json(&params)
             .send()?
@@ -101,20 +113,22 @@ impl TelegramAdapter {
             text: text.to_string(),
         };
 
-        let response = self
-            .client
-            .post(self.api_url("sendMessage"))
-            .json(&params)
-            .send()?
-            .json::<TelegramResponse<TelegramMessage>>()?;
+        self.send_with_retry(|| {
+            let response = self
+                .send_client
+                .post(self.api_url("sendMessage"))
+                .json(&params)
+                .send()?
+                .json::<TelegramResponse<TelegramMessage>>()?;
 
-        if !response.ok {
-            return Err(ChannelError::Telegram(
-                response.description.unwrap_or_default(),
-            ));
-        }
+            if !response.ok {
+                return Err(ChannelError::Telegram(
+                    response.description.unwrap_or_default(),
+                ));
+            }
 
-        Ok(response.result)
+            Ok(response.result)
+        })
     }
 
     pub fn edit_message_text(
@@ -136,20 +150,22 @@ impl TelegramAdapter {
             text: text.to_string(),
         };
 
-        let response = self
-            .client
-            .post(self.api_url("editMessageText"))
-            .json(&params)
-            .send()?
-            .json::<TelegramResponse<TelegramMessage>>()?;
+        self.send_with_retry(|| {
+            let response = self
+                .send_client
+                .post(self.api_url("editMessageText"))
+                .json(&params)
+                .send()?
+                .json::<TelegramResponse<TelegramMessage>>()?;
 
-        if !response.ok {
-            return Err(ChannelError::Telegram(
-                response.description.unwrap_or_default(),
-            ));
-        }
+            if !response.ok {
+                return Err(ChannelError::Telegram(
+                    response.description.unwrap_or_default(),
+                ));
+            }
 
-        Ok(response.result)
+            Ok(response.result)
+        })
     }
 
     pub fn check_webhook(&self) -> Result<bool, ChannelError> {
@@ -159,7 +175,7 @@ impl TelegramAdapter {
         }
 
         let response = self
-            .client
+            .send_client
             .get(self.api_url("getWebhookInfo"))
             .send()?
             .json::<TelegramResponse<WebhookInfo>>()?;
@@ -172,11 +188,36 @@ impl TelegramAdapter {
 
         Ok(response.result.url.is_some_and(|url| !url.is_empty()))
     }
+
+    /// Retries a send/edit closure on transient HTTP errors with exponential backoff.
+    /// Telegram API errors (malformed request, etc.) are not retried.
+    fn send_with_retry<F>(&self, f: F) -> Result<TelegramMessage, ChannelError>
+    where
+        F: Fn() -> Result<TelegramMessage, ChannelError>,
+    {
+        for attempt in 0..=SEND_MAX_RETRIES {
+            match f() {
+                Ok(msg) => return Ok(msg),
+                Err(ChannelError::Http(msg)) if attempt < SEND_MAX_RETRIES => {
+                    let backoff_ms = 500 * (1 << attempt); // 500ms, 1s, 2s
+                    warn!(
+                        "send failed (attempt {}): {}. Retrying in {}ms",
+                        attempt + 1,
+                        msg,
+                        backoff_ms
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("loop always returns")
+    }
 }
 
 impl ChannelAdapter for TelegramAdapter {
     fn fetch_messages(&self) -> Result<Vec<IncomingMessage>, ChannelError> {
-        let updates = self.get_updates(None, Some(30), None)?;
+        let updates = self.get_updates(None, Some(POLL_TIMEOUT_SECS), None)?;
         let messages: Vec<IncomingMessage> = updates
             .into_iter()
             .filter_map(|update| {
@@ -289,6 +330,25 @@ pub fn chunk_text(text: &str, max_len: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_poll_client_timeout_exceeds_poll_hold_time() {
+        assert!(
+            POLL_CLIENT_TIMEOUT_SECS > POLL_TIMEOUT_SECS as u64,
+            "POLL_CLIENT_TIMEOUT_SECS ({}) must exceed POLL_TIMEOUT_SECS ({})",
+            POLL_CLIENT_TIMEOUT_SECS,
+            POLL_TIMEOUT_SECS,
+        );
+    }
+
+    #[test]
+    fn test_send_client_timeout_is_short() {
+        assert!(
+            SEND_CLIENT_TIMEOUT_SECS <= 30,
+            "send client timeout ({}) should be short for quick API calls",
+            SEND_CLIENT_TIMEOUT_SECS,
+        );
+    }
 
     #[test]
     fn test_chunk_text_short() {

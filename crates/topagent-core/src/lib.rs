@@ -26,7 +26,7 @@ pub mod tools;
 pub use agent::{Agent, BashCommandClass, ExecutionStage};
 pub use cancel::CancellationToken;
 pub use channel::adapter::{ChannelAdapter, ChannelError, IncomingMessage, OutgoingMessage};
-pub use channel::telegram::TelegramAdapter;
+pub use channel::telegram::{TelegramAdapter, POLL_TIMEOUT_SECS};
 pub use context::ExecutionContext;
 pub use error::{Error, Result};
 pub use external::{ExternalTool, ExternalToolRegistry};

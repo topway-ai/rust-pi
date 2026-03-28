@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    mpsc, Arc, Mutex,
+    mpsc, Arc,
 };
 use std::thread;
 use std::time::Duration;
@@ -19,8 +19,9 @@ use topagent_core::{
     model::{ModelRoute, ProviderId, RoutingPolicy, TaskCategory},
     tools::default_tools,
     Agent, CancellationToken, ProgressCallback, ProgressUpdate, RuntimeOptions, TelegramAdapter,
+    POLL_TIMEOUT_SECS,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::progress::LiveProgress;
@@ -437,17 +438,20 @@ fn run_telegram(
     );
 
     let mut session_manager = ChatSessionManager::new(route, api_key, options);
-    let offset = Arc::new(Mutex::new(0i64));
+    let mut offset = 0i64;
     let mut polling_retries = 0usize;
 
     info!("telegram polling started");
 
     loop {
         session_manager.collect_finished_tasks();
-        let current_offset = { *offset.lock().unwrap() };
-        match adapter.get_updates(Some(current_offset), Some(30), Some(&["message"])) {
+        match adapter.get_updates(Some(offset), Some(POLL_TIMEOUT_SECS), Some(&["message"])) {
             Ok(updates) => {
                 if polling_retries > 0 {
+                    info!(
+                        "telegram polling recovered after {} retries",
+                        polling_retries
+                    );
                     session_manager.notify_polling_recovered();
                 }
                 polling_retries = 0;
@@ -455,7 +459,7 @@ fn run_telegram(
                 for update in updates {
                     session_manager.collect_finished_tasks();
                     let Some(msg) = &update.message else { continue };
-                    *offset.lock().unwrap() = update.update_id + 1;
+                    offset = update.update_id + 1;
                     let chat_id = msg.chat.id;
                     let message_id = msg.message_id;
 
@@ -552,11 +556,19 @@ fn run_telegram(
             Err(e) => {
                 polling_retries += 1;
                 session_manager.notify_polling_retry();
-                error!(
-                    "failed to get Telegram updates: {}. Retrying in 5 seconds (attempt {}).",
-                    e, polling_retries
-                );
-                std::thread::sleep(std::time::Duration::from_secs(5));
+                let backoff = std::cmp::min(5 * polling_retries as u64, 30);
+                if polling_retries <= 3 {
+                    warn!(
+                        "telegram polling failed: {}. Retrying in {}s (attempt {}).",
+                        e, backoff, polling_retries
+                    );
+                } else {
+                    error!(
+                        "telegram polling sustained failure: {}. Retrying in {}s (attempt {}).",
+                        e, backoff, polling_retries
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_secs(backoff));
             }
         }
     }
