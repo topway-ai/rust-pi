@@ -56,6 +56,15 @@ If this fails:
 - `Telegram webhook is configured`
   Remove the webhook, then run `topagent telegram` again
 
+Uninstall:
+
+```bash
+topagent uninstall
+```
+
+Removes the installed binary and stops any running TopAgent processes.
+Does not remove your source repos, workspaces, or shell profile exports.
+
 Current limits:
 
 - private chats only

@@ -85,6 +85,8 @@ enum Commands {
         #[arg(long, help = "Telegram bot token (or TELEGRAM_BOT_TOKEN)")]
         token: Option<String>,
     },
+    /// Remove the installed TopAgent binary and stop running processes.
+    Uninstall,
     #[command(hide = true)]
     Run { instruction: String },
 }
@@ -107,6 +109,7 @@ fn main() -> Result<()> {
     } = cli;
 
     match command {
+        Some(Commands::Uninstall) => return run_uninstall(),
         Some(Commands::Telegram { token }) => run_telegram(
             token,
             api_key,
@@ -148,6 +151,65 @@ fn main() -> Result<()> {
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+fn run_uninstall() -> Result<()> {
+    let my_pid = std::process::id();
+
+    // Stop running topagent processes (excluding ourselves).
+    let stopped = match std::process::Command::new("pgrep")
+        .args(["-f", "topagent telegram"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .filter_map(|s| s.parse::<u32>().ok())
+                .filter(|&pid| pid != my_pid)
+                .collect();
+            let mut killed = 0;
+            for pid in &pids {
+                let status = std::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .status();
+                if status.is_ok_and(|s| s.success()) {
+                    killed += 1;
+                }
+            }
+            killed
+        }
+        _ => 0,
+    };
+
+    if stopped > 0 {
+        println!(
+            "Stopped {} running TopAgent process{}.",
+            stopped,
+            if stopped == 1 { "" } else { "es" }
+        );
+    }
+
+    // Remove the installed binary.
+    let exe = std::env::current_exe().context("cannot determine binary path")?;
+    let exe = exe.canonicalize().context("cannot resolve binary path")?;
+
+    if exe.exists() {
+        std::fs::remove_file(&exe)
+            .with_context(|| format!("failed to remove {}", exe.display()))?;
+        println!("Removed {}.", exe.display());
+    } else {
+        println!("Binary already absent: {}", exe.display());
+    }
+
+    println!();
+    println!("TopAgent uninstalled.");
+    println!();
+    println!("Not removed (manual cleanup if needed):");
+    println!("  - Source repo / workspace directories");
+    println!("  - OPENROUTER_API_KEY / TELEGRAM_BOT_TOKEN in your shell profile");
+    println!("  - Rotate any exposed API keys or bot tokens if needed");
+
+    Ok(())
 }
 
 fn build_runtime_options(
