@@ -2149,7 +2149,7 @@ mod tests {
         let ctx = ToolContext::new(&exec, &runtime);
         let result = tool.execute(&serde_json::json!({"msg": "hello world with spaces"}), &ctx);
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().output;
         assert!(output.contains("hello world with spaces"));
     }
 
@@ -2189,7 +2189,7 @@ mod tests {
         let ctx = ToolContext::new(&exec, &runtime);
         let result = tool.execute(&serde_json::json!({"arg": "$HOME/foo --bar"}), &ctx);
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().output;
         assert!(output.contains("$HOME/foo --bar"));
     }
 

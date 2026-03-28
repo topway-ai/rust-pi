@@ -29,12 +29,12 @@ pub use channel::adapter::{ChannelAdapter, ChannelError, IncomingMessage, Outgoi
 pub use channel::telegram::{TelegramAdapter, POLL_TIMEOUT_SECS};
 pub use context::ExecutionContext;
 pub use error::{Error, Result};
-pub use external::{ExternalTool, ExternalToolRegistry};
+pub use external::{ExternalTool, ExternalToolEffect, ExternalToolRegistry, ExternalToolResult};
 pub use hooks::{HookRegistry, ToolHooks};
 pub use message::{Content, Message, Role};
 pub use model::{ModelRoute, ProviderId, RoutingPolicy, TaskCategory};
 pub use openrouter::OpenRouterProvider;
-pub use plan::{Plan, TodoItem, TodoStatus};
+pub use plan::{Plan, TaskMode, TodoItem, TodoStatus};
 pub use progress::{ProgressCallback, ProgressKind, ProgressUpdate};
 pub use project::{
     get_project_instructions_or_error, load_project_instructions, ProjectInstructionResult,

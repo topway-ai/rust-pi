@@ -5,6 +5,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalToolEffect {
+    #[default]
+    ReadOnly,
+    VerificationOnly,
+    ExecutionStarted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalToolResult {
+    pub output: String,
+    pub effect: ExternalToolEffect,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalToolConfig {
     pub name: String,
@@ -12,6 +27,8 @@ pub struct ExternalToolConfig {
     pub command: String,
     #[serde(default)]
     pub argv_template: Option<Vec<String>>,
+    #[serde(default)]
+    pub effect: ExternalToolEffect,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +45,7 @@ impl ExternalTool {
                 description: description.to_string(),
                 command: command.to_string(),
                 argv_template: None,
+                effect: ExternalToolEffect::ReadOnly,
             },
             input_schema: serde_json::json!({
                 "type": "object",
@@ -57,6 +75,11 @@ impl ExternalTool {
         self
     }
 
+    pub fn with_effect(mut self, effect: ExternalToolEffect) -> Self {
+        self.config.effect = effect;
+        self
+    }
+
     pub fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.config.name.clone(),
@@ -65,7 +88,15 @@ impl ExternalTool {
         }
     }
 
-    pub fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<String> {
+    pub fn effect(&self) -> ExternalToolEffect {
+        self.config.effect
+    }
+
+    pub fn execute(
+        &self,
+        args: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ExternalToolResult> {
         let argv_template = self.config.argv_template.as_ref().ok_or_else(|| {
             Error::InvalidInput(format!(
                 "external tool '{}' has no argv_template configured",
@@ -155,7 +186,10 @@ impl ExternalTool {
             result.push_str(&stderr);
         }
 
-        Ok(result)
+        Ok(ExternalToolResult {
+            output: result,
+            effect: self.config.effect,
+        })
     }
 }
 
@@ -237,9 +271,10 @@ mod tests {
         let result = tool.execute(&serde_json::json!({"name": "World"}), &ctx);
         assert!(result.is_ok());
         let output = result.unwrap();
-        assert!(output.contains("Hello,"));
-        assert!(output.contains("World"));
-        assert!(output.contains("!"));
+        assert_eq!(output.effect, ExternalToolEffect::ReadOnly);
+        assert!(output.output.contains("Hello,"));
+        assert!(output.output.contains("World"));
+        assert!(output.output.contains("!"));
     }
 
     #[test]
@@ -253,7 +288,7 @@ mod tests {
         let ctx = ToolContext::new(&exec, &runtime);
         let result = tool.execute(&serde_json::json!({"msg": "hello world with spaces"}), &ctx);
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().output;
         assert!(output.contains("hello world with spaces"));
     }
 
@@ -268,7 +303,7 @@ mod tests {
         let ctx = ToolContext::new(&exec, &runtime);
         let result = tool.execute(&serde_json::json!({"input": "foo --bar=baz \"qux\""}), &ctx);
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().output;
         assert!(output.contains("foo --bar=baz \"qux\""));
     }
 
@@ -283,7 +318,7 @@ mod tests {
         let ctx = ToolContext::new(&exec, &runtime);
         let result = tool.execute(&serde_json::json!({"arg": "$HOME"}), &ctx);
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.unwrap().output;
         assert!(output.contains("$HOME"));
         assert!(!output.contains("/home"));
     }
@@ -374,11 +409,27 @@ mod tests {
         let mut registry = ExternalToolRegistry::new();
         let json = r#"[
             {"name": "tool1", "description": "first tool", "command": "echo", "argv_template": []},
-            {"name": "tool2", "description": "second tool", "command": "ls", "argv_template": ["-la"]}
+            {"name": "tool2", "description": "second tool", "command": "ls", "argv_template": ["-la"], "effect": "execution_started"}
         ]"#;
         registry.load_from_str(json).unwrap();
 
         assert!(registry.get("tool1").is_some());
         assert!(registry.get("tool2").is_some());
+        assert_eq!(
+            registry.get("tool1").unwrap().effect(),
+            ExternalToolEffect::ReadOnly
+        );
+        assert_eq!(
+            registry.get("tool2").unwrap().effect(),
+            ExternalToolEffect::ExecutionStarted
+        );
+    }
+
+    #[test]
+    fn test_external_tool_effect_builder() {
+        let tool = ExternalTool::new("exec", "execution tool", "true")
+            .with_argv_template(vec![])
+            .with_effect(ExternalToolEffect::ExecutionStarted);
+        assert_eq!(tool.effect(), ExternalToolEffect::ExecutionStarted);
     }
 }

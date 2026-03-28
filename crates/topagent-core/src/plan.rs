@@ -24,6 +24,13 @@ pub struct Plan {
     next_id: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskMode {
+    PlanAndExecute,
+    InspectOnly,
+    VerifyOnly,
+}
+
 impl Plan {
     pub fn new() -> Self {
         Self::default()
@@ -170,6 +177,75 @@ fn is_trivial_query(lower: &str) -> bool {
         "get ", "read ",
     ];
     query_starters.iter().any(|q| lower.starts_with(q)) && lower.len() < 120
+}
+
+pub fn task_mode_fast_path(instruction: &str) -> Option<TaskMode> {
+    let lower = instruction.to_lowercase();
+    if has_mutation_intent(&lower) {
+        return Some(TaskMode::PlanAndExecute);
+    }
+
+    None
+}
+
+fn has_mutation_intent(lower: &str) -> bool {
+    let mutation_cues = [
+        "fix",
+        "change",
+        "modify",
+        "edit",
+        "write",
+        "update",
+        "implement",
+        "add",
+        "remove",
+        "delete",
+        "refactor",
+        "rename",
+        "create",
+        "patch",
+        "replace",
+    ];
+
+    mutation_cues.iter().any(|cue| lower.contains(cue))
+}
+
+pub const TASK_MODE_CLASSIFICATION_SYSTEM_PROMPT: &str = "\
+You are a task-mode classifier for a coding agent. Given a user instruction, decide \
+what kind of task it is.
+
+Respond with ONLY one of these exact words:
+- execute
+- inspect
+- verify
+
+execute:
+  - The task expects the agent to make or apply changes before finishing
+  - The task asks to implement, fix, edit, add, remove, refactor, or otherwise mutate something
+
+inspect:
+  - The task expects research, analysis, explanation, reporting, or findings only
+  - The task should finish without making changes
+
+verify:
+  - The task expects running checks or tests only
+  - The task may report verification results, but should finish without making changes";
+
+pub fn build_task_mode_messages(instruction: &str) -> (String, String) {
+    (
+        TASK_MODE_CLASSIFICATION_SYSTEM_PROMPT.to_string(),
+        instruction.to_string(),
+    )
+}
+
+pub fn parse_task_mode_response(response: &str) -> Option<TaskMode> {
+    let trimmed = response.trim().to_lowercase();
+    match trimmed.as_str() {
+        "execute" => Some(TaskMode::PlanAndExecute),
+        "inspect" => Some(TaskMode::InspectOnly),
+        "verify" => Some(TaskMode::VerifyOnly),
+        _ => None,
+    }
 }
 
 /// The system prompt used for the lightweight LLM classification call.
@@ -549,6 +625,39 @@ mod tests {
         assert!(system.contains("direct"));
         assert!(system.contains("plan"));
         assert_eq!(user, "fix the typo");
+    }
+
+    #[test]
+    fn test_task_mode_fast_path_detects_mutation() {
+        assert_eq!(
+            task_mode_fast_path("Make a plan and implement the feature"),
+            Some(TaskMode::PlanAndExecute)
+        );
+    }
+
+    #[test]
+    fn test_task_mode_fast_path_defers_non_mutation_tasks() {
+        assert_eq!(
+            task_mode_fast_path("Make a plan to assess the repository and return findings only"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_task_mode_parse_response() {
+        assert_eq!(
+            parse_task_mode_response("execute"),
+            Some(TaskMode::PlanAndExecute)
+        );
+        assert_eq!(
+            parse_task_mode_response("inspect"),
+            Some(TaskMode::InspectOnly)
+        );
+        assert_eq!(
+            parse_task_mode_response("verify"),
+            Some(TaskMode::VerifyOnly)
+        );
+        assert_eq!(parse_task_mode_response("unknown"), None);
     }
 
     // ── should_use_plan backward compatibility (heuristic-only fallback) ──

@@ -1,5 +1,5 @@
 use crate::context::{ExecutionContext, ToolContext};
-use crate::external::ExternalToolRegistry;
+use crate::external::{ExternalToolEffect, ExternalToolRegistry};
 use crate::hooks::HookRegistry;
 use crate::model::{ModelRoute, RoutingPolicy};
 use crate::plan::{self, Plan};
@@ -54,6 +54,9 @@ const UNPLANNED_MUTATION_ESCALATION_THRESHOLD: usize = 3;
 const PLANNING_REDIRECT_MSG: &str = "\
 This task requires a plan before proceeding. \
 Use the update_plan tool to create a plan with concrete steps, then execute it.";
+const PRE_EXECUTION_REDIRECT_MSG: &str = "\
+This task already has a plan, but execution has not started yet. \
+Execute at least one concrete plan step before running verification or returning a final answer.";
 
 pub struct Agent {
     session: Session,
@@ -66,6 +69,8 @@ pub struct Agent {
     changed_files: RefCell<Vec<String>>,
     bash_history: RefCell<Vec<(String, String, i32)>>,
     planning_gate_active: bool,
+    planning_required_for_task: bool,
+    task_mode: plan::TaskMode,
     /// Set to true if the planning gate was activated mid-run by runtime
     /// escalation (risk #3). Prevents re-escalation after auto-plan.
     planning_escalated: bool,
@@ -146,6 +151,8 @@ impl Agent {
             changed_files: RefCell::new(Vec::new()),
             bash_history: RefCell::new(Vec::new()),
             planning_gate_active: false,
+            planning_required_for_task: false,
+            task_mode: plan::TaskMode::PlanAndExecute,
             planning_escalated: false,
             resolved_route,
             execution_stage: ExecutionStage::Research,
@@ -289,6 +296,27 @@ impl Agent {
         }
     }
 
+    fn classify_task_mode(&self, instruction: &str) -> plan::TaskMode {
+        match plan::task_mode_fast_path(instruction) {
+            Some(mode) => mode,
+            None => self.classify_task_mode_with_llm(instruction),
+        }
+    }
+
+    fn classify_task_mode_with_llm(&self, instruction: &str) -> plan::TaskMode {
+        let (system_prompt, user_msg) = plan::build_task_mode_messages(instruction);
+        let messages = vec![Message::system(system_prompt), Message::user(user_msg)];
+        let route = self.resolved_route.clone();
+
+        match self.provider.complete(&messages, &route) {
+            Ok(ProviderResponse::Message(msg)) => msg
+                .as_text()
+                .and_then(plan::parse_task_mode_response)
+                .unwrap_or(plan::TaskMode::PlanAndExecute),
+            _ => plan::TaskMode::PlanAndExecute,
+        }
+    }
+
     /// Break a planning deadlock by generating a real plan via the LLM.
     /// Falls back to a minimal emergency plan if the LLM call fails.
     /// Always deactivates the planning gate afterward.
@@ -372,6 +400,7 @@ impl Agent {
         let distinct_files = self.changed_files.borrow().len();
         if distinct_files >= UNPLANNED_MUTATION_ESCALATION_THRESHOLD {
             self.planning_gate_active = true;
+            self.planning_required_for_task = true;
             self.planning_escalated = true;
             self.emit_progress(ProgressUpdate::planning());
         }
@@ -454,6 +483,56 @@ impl Agent {
 
     pub fn is_planning_gate_active(&self) -> bool {
         self.planning_gate_active
+    }
+
+    fn execution_started(&self) -> bool {
+        self.execution_stage != ExecutionStage::Research
+    }
+
+    fn mark_execution_started(&mut self) {
+        if self.execution_stage == ExecutionStage::Research {
+            self.execution_stage = ExecutionStage::Edit;
+        }
+    }
+
+    fn task_requires_concrete_execution(&self) -> bool {
+        matches!(self.task_mode, plan::TaskMode::PlanAndExecute)
+    }
+
+    fn should_block_pre_execution_actions(&self) -> bool {
+        self.planning_required_for_task
+            && self.plan_exists()
+            && !self.execution_started()
+            && self.task_requires_concrete_execution()
+    }
+
+    fn check_pre_execution_verification_gate(
+        &self,
+        tool_name: &str,
+        bash_args: Option<&serde_json::Value>,
+        external_effect: Option<ExternalToolEffect>,
+    ) -> Option<String> {
+        if !self.should_block_pre_execution_actions() {
+            return None;
+        }
+
+        if tool_name == "bash" {
+            let args = bash_args?;
+            let cmd = args.get("command").and_then(|c| c.as_str())?;
+            if Self::classify_bash_command(cmd) == BashCommandClass::Verification {
+                return Some(
+                    "A plan exists, but no concrete execution step has run yet. Execute at least one plan step before verification commands.".to_string(),
+                );
+            }
+        }
+
+        if matches!(external_effect, Some(ExternalToolEffect::VerificationOnly)) {
+            return Some(
+                "A plan exists, but no concrete execution step has run yet. Execute at least one plan step before verification tools.".to_string(),
+            );
+        }
+
+        None
     }
 
     fn compute_file_hash(path: &Path) -> Option<String> {
@@ -663,6 +742,7 @@ impl Agent {
         &self,
         tool_name: &str,
         bash_args: Option<&serde_json::Value>,
+        external_effect: Option<ExternalToolEffect>,
     ) -> Option<String> {
         if !self.planning_gate_active {
             return None;
@@ -679,9 +759,7 @@ impl Agent {
             if let Some(args) = bash_args {
                 if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
                     let class = Self::classify_bash_command(cmd);
-                    if class == BashCommandClass::ResearchSafe
-                        || class == BashCommandClass::Verification
-                    {
+                    if class == BashCommandClass::ResearchSafe {
                         return None;
                     }
                 }
@@ -694,6 +772,22 @@ impl Agent {
             return Some(
                 "Planning required for this task. Use update_plan to create a plan before mutation commands.".to_string(),
             );
+        }
+
+        if let Some(effect) = external_effect {
+            if self.plan_exists() {
+                return None;
+            }
+
+            return match effect {
+                ExternalToolEffect::ReadOnly => None,
+                ExternalToolEffect::VerificationOnly => Some(
+                    "Planning required for this task. Create a plan before running verification tools.".to_string(),
+                ),
+                ExternalToolEffect::ExecutionStarted => Some(
+                    "Planning required for this task. Create a plan before running execution tools.".to_string(),
+                ),
+            };
         }
 
         if !Self::is_mutation_tool(tool_name) {
@@ -818,7 +912,14 @@ impl Agent {
 
         self.capture_run_baseline(&ctx.workspace_root);
 
-        self.planning_gate_active = self.options.require_plan && self.classify_task(instruction);
+        self.planning_required_for_task =
+            self.options.require_plan && self.classify_task(instruction);
+        self.task_mode = if self.planning_required_for_task {
+            self.classify_task_mode(instruction)
+        } else {
+            plan::TaskMode::PlanAndExecute
+        };
+        self.planning_gate_active = self.planning_required_for_task;
         self.planning_escalated = false;
         self.planning_block_count = 0;
 
@@ -966,6 +1067,18 @@ impl Agent {
                             continue;
                         }
 
+                        if self.should_block_pre_execution_actions() {
+                            self.session.pop_last_if(|m| {
+                                m.as_text()
+                                    .map(|t| t == PRE_EXECUTION_REDIRECT_MSG)
+                                    .unwrap_or(false)
+                            });
+                            self.session.add_message(msg);
+                            self.session
+                                .add_message(Message::user(PRE_EXECUTION_REDIRECT_MSG));
+                            continue;
+                        }
+
                         self.session.add_message(msg);
                         let final_response = self.build_proof_of_work(&text, &ctx.workspace_root);
                         return Ok(final_response);
@@ -979,6 +1092,7 @@ impl Agent {
                         Some(t) => t,
                         None if is_external => {
                             let external_tool = self.external_tools.get(&name).unwrap();
+                            let external_effect = external_tool.effect();
                             if let Some(hooks) = self.hooks.get(&name) {
                                 if !hooks.run_pre_hooks(&name, &args, &tool_ctx) {
                                     self.session.add_message(Message::tool_request(
@@ -996,7 +1110,9 @@ impl Agent {
                                     continue;
                                 }
                             }
-                            if let Some(block_msg) = self.check_planning_gate(&name, None) {
+                            if let Some(block_msg) =
+                                self.check_planning_gate(&name, None, Some(external_effect))
+                            {
                                 self.emit_progress(Self::blocked_progress(&block_msg));
                                 self.session.add_message(Message::tool_request(
                                     id.clone(),
@@ -1006,6 +1122,21 @@ impl Agent {
                                 self.session
                                     .add_message(Message::tool_result(id, block_msg));
                                 self.note_planning_block(instruction)?;
+                                continue;
+                            }
+                            if let Some(block_msg) = self.check_pre_execution_verification_gate(
+                                &name,
+                                None,
+                                Some(external_effect),
+                            ) {
+                                self.emit_progress(Self::blocked_progress(&block_msg));
+                                self.session.add_message(Message::tool_request(
+                                    id.clone(),
+                                    name.clone(),
+                                    args,
+                                ));
+                                self.session
+                                    .add_message(Message::tool_result(id, block_msg));
                                 continue;
                             }
                             self.emit_progress(self.tool_progress(&name, &args));
@@ -1028,7 +1159,12 @@ impl Agent {
                                 args,
                             ));
                             let result_str = match result {
-                                Ok(r) => r,
+                                Ok(r) => {
+                                    if matches!(r.effect, ExternalToolEffect::ExecutionStarted) {
+                                        self.mark_execution_started();
+                                    }
+                                    r.output
+                                }
                                 Err(e) => {
                                     self.session.add_message(Message::tool_result(
                                         id,
@@ -1086,7 +1222,7 @@ impl Agent {
                     }
 
                     let bash_args = if name == "bash" { Some(&args) } else { None };
-                    if let Some(block_msg) = self.check_planning_gate(&name, bash_args) {
+                    if let Some(block_msg) = self.check_planning_gate(&name, bash_args, None) {
                         self.emit_progress(Self::blocked_progress(&block_msg));
                         self.session.add_message(Message::tool_request(
                             id.clone(),
@@ -1096,6 +1232,19 @@ impl Agent {
                         self.session
                             .add_message(Message::tool_result(id, block_msg));
                         self.note_planning_block(instruction)?;
+                        continue;
+                    }
+                    if let Some(block_msg) =
+                        self.check_pre_execution_verification_gate(&name, bash_args, None)
+                    {
+                        self.emit_progress(Self::blocked_progress(&block_msg));
+                        self.session.add_message(Message::tool_request(
+                            id.clone(),
+                            name.clone(),
+                            args,
+                        ));
+                        self.session
+                            .add_message(Message::tool_result(id, block_msg));
                         continue;
                     }
 
@@ -1124,6 +1273,7 @@ impl Agent {
                     };
                     self.check_cancelled(ctx)?;
 
+                    let mut execution_started_by_bash = false;
                     if name == "bash" {
                         let class = if let Some(cmd_str) = &bash_cmd {
                             Self::classify_bash_command(cmd_str)
@@ -1142,15 +1292,21 @@ impl Agent {
                         ) {
                             let found_new_change =
                                 self.reconcile_changed_files(&ctx.workspace_root);
-                            if found_new_change && self.execution_stage == ExecutionStage::Research
-                            {
-                                self.execution_stage = ExecutionStage::Edit;
+                            if found_new_change {
+                                execution_started_by_bash = true;
                             }
+                        }
+                        if class == BashCommandClass::MutationRisk {
+                            execution_started_by_bash = true;
                         }
                     }
 
                     if let Some(hooks) = self.hooks.get(&name) {
                         result = hooks.run_post_hooks(&name, &args, &result, &tool_ctx);
+                    }
+
+                    if execution_started_by_bash {
+                        self.mark_execution_started();
                     }
 
                     if let Some(path) = changed_path {
@@ -1159,9 +1315,7 @@ impl Agent {
 
                     if Self::is_mutation_tool(&name) {
                         self.reconcile_changed_files(&ctx.workspace_root);
-                        if self.execution_stage == ExecutionStage::Research {
-                            self.execution_stage = ExecutionStage::Edit;
-                        }
+                        self.mark_execution_started();
                         // Risk #3: escalate to planning if unplanned mutations
                         // are spreading across many files.
                         self.maybe_escalate_to_planning();
@@ -1195,6 +1349,7 @@ impl Agent {
                             Some(t) => t,
                             None if is_external => {
                                 let external_tool = self.external_tools.get(&name).unwrap();
+                                let external_effect = external_tool.effect();
                                 if let Some(hooks) = self.hooks.get(&name) {
                                     if !hooks.run_pre_hooks(&name, &args, &tool_ctx) {
                                         self.session.add_message(Message::tool_request(
@@ -1212,7 +1367,9 @@ impl Agent {
                                         continue;
                                     }
                                 }
-                                if let Some(block_msg) = self.check_planning_gate(&name, None) {
+                                if let Some(block_msg) =
+                                    self.check_planning_gate(&name, None, Some(external_effect))
+                                {
                                     self.emit_progress(Self::blocked_progress(&block_msg));
                                     self.session.add_message(Message::tool_request(
                                         id.clone(),
@@ -1222,6 +1379,21 @@ impl Agent {
                                     self.session
                                         .add_message(Message::tool_result(id, block_msg));
                                     self.note_planning_block(instruction)?;
+                                    continue;
+                                }
+                                if let Some(block_msg) = self.check_pre_execution_verification_gate(
+                                    &name,
+                                    None,
+                                    Some(external_effect),
+                                ) {
+                                    self.emit_progress(Self::blocked_progress(&block_msg));
+                                    self.session.add_message(Message::tool_request(
+                                        id.clone(),
+                                        name.clone(),
+                                        args.clone(),
+                                    ));
+                                    self.session
+                                        .add_message(Message::tool_result(id, block_msg));
                                     continue;
                                 }
                                 self.emit_progress(self.tool_progress(&name, &args));
@@ -1245,7 +1417,13 @@ impl Agent {
                                     args.clone(),
                                 ));
                                 let result_str = match result {
-                                    Ok(r) => r,
+                                    Ok(r) => {
+                                        if matches!(r.effect, ExternalToolEffect::ExecutionStarted)
+                                        {
+                                            self.mark_execution_started();
+                                        }
+                                        r.output
+                                    }
                                     Err(e) => {
                                         self.session.add_message(Message::tool_result(
                                             id,
@@ -1288,7 +1466,7 @@ impl Agent {
                         }
 
                         let bash_args = if name == "bash" { Some(&args) } else { None };
-                        if let Some(block_msg) = self.check_planning_gate(&name, bash_args) {
+                        if let Some(block_msg) = self.check_planning_gate(&name, bash_args, None) {
                             self.emit_progress(Self::blocked_progress(&block_msg));
                             self.session.add_message(Message::tool_request(
                                 id.clone(),
@@ -1298,6 +1476,19 @@ impl Agent {
                             self.session
                                 .add_message(Message::tool_result(id, block_msg));
                             self.note_planning_block(instruction)?;
+                            continue;
+                        }
+                        if let Some(block_msg) =
+                            self.check_pre_execution_verification_gate(&name, bash_args, None)
+                        {
+                            self.emit_progress(Self::blocked_progress(&block_msg));
+                            self.session.add_message(Message::tool_request(
+                                id.clone(),
+                                name.clone(),
+                                args.clone(),
+                            ));
+                            self.session
+                                .add_message(Message::tool_result(id, block_msg));
                             continue;
                         }
 
@@ -1325,6 +1516,7 @@ impl Agent {
                         };
                         self.check_cancelled(ctx)?;
 
+                        let mut execution_started_by_bash = false;
                         if name == "bash" {
                             let class = if let Some(cmd_str) = &bash_cmd {
                                 Self::classify_bash_command(cmd_str)
@@ -1345,11 +1537,12 @@ impl Agent {
                             ) {
                                 let found_new_change =
                                     self.reconcile_changed_files(&ctx.workspace_root);
-                                if found_new_change
-                                    && self.execution_stage == ExecutionStage::Research
-                                {
-                                    self.execution_stage = ExecutionStage::Edit;
+                                if found_new_change {
+                                    execution_started_by_bash = true;
                                 }
+                            }
+                            if class == BashCommandClass::MutationRisk {
+                                execution_started_by_bash = true;
                             }
                         }
 
@@ -1357,13 +1550,15 @@ impl Agent {
                             result = hooks.run_post_hooks(&name, &args, &result, &tool_ctx);
                         }
 
+                        if execution_started_by_bash {
+                            self.mark_execution_started();
+                        }
+
                         self.track_changed_file(&name, &args);
 
                         if Self::is_mutation_tool(&name) {
                             self.reconcile_changed_files(&ctx.workspace_root);
-                            if self.execution_stage == ExecutionStage::Research {
-                                self.execution_stage = ExecutionStage::Edit;
-                            }
+                            self.mark_execution_started();
                             self.maybe_escalate_to_planning();
                         }
 
@@ -1545,7 +1740,105 @@ fn extract_exit_code(result: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_exit_code;
+    use super::{extract_exit_code, Agent};
+    use crate::context::ExecutionContext;
+    use crate::provider::{ProviderResponse, ScriptedProvider};
+    use crate::runtime::RuntimeOptions;
+    use crate::tools::default_tools;
+    use crate::Message;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn create_temp_crate() -> (TempDir, ExecutionContext) {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().to_path_buf();
+        fs::create_dir_all(temp.path().join("src")).unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            r#"[package]
+name = "stage_gate_fixture"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("src/lib.rs"),
+            "pub fn answer() -> u32 {\n    42\n}\n",
+        )
+        .unwrap();
+
+        (temp, ExecutionContext::new(root))
+    }
+
+    fn make_plan_required_agent(responses: Vec<ProviderResponse>) -> Agent {
+        Agent::with_options(
+            Box::new(ScriptedProvider::new(responses)),
+            default_tools().into_inner(),
+            RuntimeOptions::default(),
+        )
+    }
+
+    fn assistant_message(text: &str) -> ProviderResponse {
+        ProviderResponse::Message(Message::assistant(text))
+    }
+
+    fn task_mode_message(mode: &str) -> ProviderResponse {
+        assistant_message(mode)
+    }
+
+    fn tool_call(id: &str, name: &str, args: serde_json::Value) -> ProviderResponse {
+        ProviderResponse::ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            args,
+        }
+    }
+
+    fn update_plan_call(id: &str) -> ProviderResponse {
+        tool_call(
+            id,
+            "update_plan",
+            serde_json::json!({
+                "items": [
+                    {"content": "Edit src/lib.rs", "status": "in_progress"},
+                    {"content": "Run cargo check --offline", "status": "pending"}
+                ]
+            }),
+        )
+    }
+
+    fn write_lib_call(id: &str, content: &str) -> ProviderResponse {
+        tool_call(
+            id,
+            "write",
+            serde_json::json!({
+                "path": "src/lib.rs",
+                "content": content,
+            }),
+        )
+    }
+
+    fn cargo_check_call(id: &str) -> ProviderResponse {
+        tool_call(
+            id,
+            "bash",
+            serde_json::json!({
+                "command": "cargo check --offline",
+            }),
+        )
+    }
+
+    fn write_commands_json(temp: &TempDir, entries: serde_json::Value) {
+        fs::write(
+            temp.path().join("commands.json"),
+            serde_json::to_string(&entries).unwrap(),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn test_extract_exit_code_zero() {
@@ -1566,5 +1859,205 @@ mod tests {
     #[test]
     fn test_extract_exit_code_negative() {
         assert_eq!(extract_exit_code("Output: x\nExit code: -1"), -1);
+    }
+
+    #[test]
+    fn test_inspection_only_task_does_not_get_blocked_unnecessarily() {
+        let (_temp, ctx) = create_temp_crate();
+        let mut agent = make_plan_required_agent(vec![
+            task_mode_message("inspect"),
+            update_plan_call("plan"),
+            assistant_message("assessment complete"),
+        ]);
+
+        let result = agent
+            .run(
+                &ctx,
+                "Make a plan to assess this codebase and return findings only.",
+            )
+            .unwrap();
+
+        assert_eq!(result, "assessment complete");
+    }
+
+    #[test]
+    fn test_verification_only_task_does_not_get_blocked_unnecessarily() {
+        let (_temp, ctx) = create_temp_crate();
+        let mut agent = make_plan_required_agent(vec![
+            task_mode_message("verify"),
+            update_plan_call("plan"),
+            cargo_check_call("verify"),
+            assistant_message("validation complete"),
+        ]);
+
+        let result = agent
+            .run(
+                &ctx,
+                "Make a plan to validate this crate and report the result only.",
+            )
+            .unwrap();
+
+        assert!(result.contains("validation complete"));
+        assert_eq!(result.matches("`cargo check --offline`").count(), 1);
+    }
+
+    #[test]
+    fn test_plan_required_task_cannot_verify_before_plan_exists() {
+        let (_temp, ctx) = create_temp_crate();
+        let mut agent = make_plan_required_agent(vec![
+            cargo_check_call("verify_before_plan"),
+            update_plan_call("plan"),
+            write_lib_call("write", "pub fn answer() -> u32 {\n    43\n}\n"),
+            cargo_check_call("verify_after_execution"),
+            assistant_message("done after execution"),
+        ]);
+
+        let result = agent
+            .run(
+                &ctx,
+                "Make a plan for this codebase-wide change, then implement it safely.",
+            )
+            .unwrap();
+
+        assert_eq!(result.matches("`cargo check --offline`").count(), 1);
+        assert!(result.contains("Verification passed."));
+    }
+
+    #[test]
+    fn test_plan_required_task_cannot_verify_before_execution_happened() {
+        let (_temp, ctx) = create_temp_crate();
+        let mut agent = make_plan_required_agent(vec![
+            update_plan_call("plan"),
+            cargo_check_call("verify_before_execution"),
+            write_lib_call("write", "pub fn answer() -> u32 {\n    44\n}\n"),
+            cargo_check_call("verify_after_execution"),
+            assistant_message("done after execution"),
+        ]);
+
+        let result = agent
+            .run(
+                &ctx,
+                "Make a plan for this codebase-wide change, then implement it safely.",
+            )
+            .unwrap();
+
+        assert_eq!(result.matches("`cargo check --offline`").count(), 1);
+        assert!(result.contains("- src/lib.rs"));
+    }
+
+    #[test]
+    fn test_plan_required_task_can_verify_after_execution_happened() {
+        let (_temp, ctx) = create_temp_crate();
+        let mut agent = make_plan_required_agent(vec![
+            update_plan_call("plan"),
+            write_lib_call("write", "pub fn answer() -> u32 {\n    45\n}\n"),
+            cargo_check_call("verify_after_execution"),
+            assistant_message("done after verification"),
+        ]);
+
+        let result = agent
+            .run(
+                &ctx,
+                "Make a plan for this codebase-wide change, then implement it safely.",
+            )
+            .unwrap();
+
+        assert!(result.contains("done after verification"));
+        assert!(result.contains("Verification passed."));
+        assert_eq!(result.matches("`cargo check --offline`").count(), 1);
+    }
+
+    #[test]
+    fn test_final_text_response_is_rejected_until_execution_started() {
+        let (_temp, ctx) = create_temp_crate();
+        let mut agent = make_plan_required_agent(vec![
+            assistant_message("done before plan"),
+            update_plan_call("plan"),
+            assistant_message("done before execution"),
+            write_lib_call("write", "pub fn answer() -> u32 {\n    46\n}\n"),
+            assistant_message("done after execution"),
+        ]);
+
+        let result = agent
+            .run(
+                &ctx,
+                "Make a plan for this codebase-wide change, then implement it safely.",
+            )
+            .unwrap();
+
+        assert!(result.starts_with("done after execution"));
+        assert!(result.contains("- src/lib.rs"));
+        assert!(!result.contains("done before execution"));
+    }
+
+    #[test]
+    fn test_external_tool_execution_effect_unlocks_verification_without_diff() {
+        let (temp, ctx) = create_temp_crate();
+        write_commands_json(
+            &temp,
+            serde_json::json!([
+                {
+                    "name": "start_exec",
+                    "description": "mark execution started",
+                    "command": "true",
+                    "argv_template": [],
+                    "effect": "execution_started"
+                }
+            ]),
+        );
+
+        let mut agent = make_plan_required_agent(vec![
+            update_plan_call("plan"),
+            tool_call("exec", "start_exec", serde_json::json!({})),
+            cargo_check_call("verify"),
+            assistant_message("done after external execution"),
+        ]);
+
+        let result = agent
+            .run(
+                &ctx,
+                "Make a plan for this codebase-wide change, then implement it safely.",
+            )
+            .unwrap();
+
+        assert!(result.contains("done after external execution"));
+        assert!(result.contains("Verification passed."));
+        assert_eq!(result.matches("`cargo check --offline`").count(), 1);
+    }
+
+    #[test]
+    fn test_verification_remains_blocked_without_real_execution_signal() {
+        let (temp, ctx) = create_temp_crate();
+        write_commands_json(
+            &temp,
+            serde_json::json!([
+                {
+                    "name": "read_tool",
+                    "description": "read-only helper",
+                    "command": "true",
+                    "argv_template": [],
+                    "effect": "read_only"
+                }
+            ]),
+        );
+
+        let mut agent = make_plan_required_agent(vec![
+            update_plan_call("plan"),
+            tool_call("read", "read_tool", serde_json::json!({})),
+            cargo_check_call("verify_before_execution"),
+            write_lib_call("write", "pub fn answer() -> u32 {\n    47\n}\n"),
+            cargo_check_call("verify_after_execution"),
+            assistant_message("done after real execution"),
+        ]);
+
+        let result = agent
+            .run(
+                &ctx,
+                "Make a plan for this codebase-wide change, then implement it safely.",
+            )
+            .unwrap();
+
+        assert_eq!(result.matches("`cargo check --offline`").count(), 1);
+        assert!(result.contains("done after real execution"));
     }
 }
