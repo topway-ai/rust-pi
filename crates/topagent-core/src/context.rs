@@ -1,14 +1,33 @@
-use crate::runtime::RuntimeOptions;
+use crate::{cancel::CancellationToken, runtime::RuntimeOptions};
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
     pub workspace_root: PathBuf,
+    cancel_token: Option<CancellationToken>,
 }
 
 impl ExecutionContext {
     pub fn new(workspace_root: PathBuf) -> Self {
-        Self { workspace_root }
+        Self {
+            workspace_root,
+            cancel_token: None,
+        }
+    }
+
+    pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
+        self.cancel_token = Some(cancel_token);
+        self
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+    }
+
+    pub fn cancel_token(&self) -> Option<&CancellationToken> {
+        self.cancel_token.as_ref()
     }
 
     pub fn resolve_path(&self, relative_path: &str) -> Result<PathBuf, super::Error> {

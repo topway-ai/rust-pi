@@ -1,14 +1,19 @@
 use crate::tool_spec::ToolSpec;
-use crate::{Content, Error, Message, Provider, ProviderResponse, Result, Role, ToolCallEntry};
+use crate::{
+    CancellationToken, Content, Error, Message, Provider, ProviderResponse, Result, Role,
+    ToolCallEntry,
+};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 #[derive(Debug, Clone)]
 pub struct OpenRouterProvider {
     api_key: String,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
     tools: Vec<ToolSpec>,
+    base_url: String,
 }
 
 impl OpenRouterProvider {
@@ -20,11 +25,12 @@ impl OpenRouterProvider {
     pub fn with_timeout(api_key: impl Into<String>, timeout_secs: u64) -> Self {
         Self {
             api_key: api_key.into(),
-            client: reqwest::blocking::Client::builder()
+            client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(timeout_secs))
                 .build()
                 .expect("failed to create HTTP client"),
             tools: crate::tools::default_tools().specs(),
+            base_url: OPENROUTER_BASE_URL.to_string(),
         }
     }
 
@@ -42,13 +48,28 @@ impl OpenRouterProvider {
         tools: Vec<ToolSpec>,
         timeout_secs: u64,
     ) -> Self {
+        Self::with_tools_timeout_and_base_url(
+            api_key,
+            tools,
+            timeout_secs,
+            OPENROUTER_BASE_URL.to_string(),
+        )
+    }
+
+    pub fn with_tools_timeout_and_base_url(
+        api_key: impl Into<String>,
+        tools: Vec<ToolSpec>,
+        timeout_secs: u64,
+        base_url: impl Into<String>,
+    ) -> Self {
         Self {
             api_key: api_key.into(),
-            client: reqwest::blocking::Client::builder()
+            client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(timeout_secs))
                 .build()
                 .expect("failed to create HTTP client"),
             tools,
+            base_url: base_url.into(),
         }
     }
 }
@@ -59,34 +80,77 @@ impl Provider for OpenRouterProvider {
         messages: &[Message],
         route: &crate::ModelRoute,
     ) -> Result<ProviderResponse> {
+        self.complete_with_cancel(messages, route, None)
+    }
+
+    fn complete_with_cancel(
+        &self,
+        messages: &[Message],
+        route: &crate::ModelRoute,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<ProviderResponse> {
         let request = self.build_request(messages, &route.model_id);
-        let response = self
-            .client
-            .post(format!("{}/chat/completions", OPENROUTER_BASE_URL))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .map_err(|e| Error::ProviderRequestFailed(format!("request failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            return Err(Error::ProviderRequestFailed(format!(
-                "API error {}: {}",
-                status, body
-            )));
-        }
-
-        let completion: OpenAIResponse = response
-            .json()
-            .map_err(|e| Error::ProviderParseFailed(format!("failed to parse response: {}", e)))?;
-
-        self.parse_response(completion)
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::Provider(format!("failed to create provider runtime: {}", e)))?;
+        runtime.block_on(self.complete_async(request, cancel.cloned()))
     }
 }
 
 impl OpenRouterProvider {
+    async fn complete_async(
+        &self,
+        request: ChatRequest,
+        cancel: Option<CancellationToken>,
+    ) -> Result<ProviderResponse> {
+        let response = self
+            .await_with_cancel(
+                self.client
+                    .post(format!("{}/chat/completions", self.base_url))
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .header("Content-Type", "application/json")
+                    .json(&request)
+                    .send(),
+                cancel.clone(),
+            )
+            .await?;
+
+        let status = response.status();
+        let body = self.await_with_cancel(response.bytes(), cancel).await?;
+
+        if !status.is_success() {
+            return Err(Error::ProviderRequestFailed(format!(
+                "API error {}: {}",
+                status,
+                String::from_utf8_lossy(&body)
+            )));
+        }
+
+        let completion: OpenAIResponse = serde_json::from_slice(&body)
+            .map_err(|e| Error::ProviderParseFailed(format!("failed to parse response: {}", e)))?;
+
+        self.parse_response(completion)
+    }
+
+    async fn await_with_cancel<T>(
+        &self,
+        future: impl std::future::Future<Output = std::result::Result<T, reqwest::Error>>,
+        cancel: Option<CancellationToken>,
+    ) -> std::result::Result<T, Error> {
+        match cancel {
+            Some(cancel_token) => {
+                tokio::select! {
+                    result = future => result.map_err(|e| Error::ProviderRequestFailed(e.to_string())),
+                    _ = wait_for_cancel(cancel_token) => Err(Error::Stopped("user requested stop".into())),
+                }
+            }
+            None => future
+                .await
+                .map_err(|e| Error::ProviderRequestFailed(e.to_string())),
+        }
+    }
+
     pub(crate) fn build_request(&self, messages: &[Message], model_id: &str) -> ChatRequest {
         let wire_messages: Vec<WireMessage> = messages.iter().map(message_to_wire).collect();
 
@@ -154,6 +218,12 @@ impl OpenRouterProvider {
             role: Role::Assistant,
             content: Content::Text { text: content },
         }))
+    }
+}
+
+async fn wait_for_cancel(cancel: CancellationToken) {
+    while !cancel.is_cancelled() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -288,6 +358,11 @@ struct FunctionCall {
 mod tests {
     use super::*;
     use crate::tools::default_tools;
+    use crate::{CancellationToken, ModelRoute, Provider};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Instant;
 
     #[test]
     fn test_build_request_uses_default_tools() {
@@ -469,5 +544,55 @@ mod tests {
         assert_eq!(wire.role, "tool");
         assert!(wire.tool_call_id.as_ref().unwrap() == "call_1");
         assert!(wire.content.is_some());
+    }
+
+    #[test]
+    fn test_transport_cancellation_stops_inflight_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            thread::sleep(Duration::from_secs(1));
+            let body = r#"{"choices":[{"message":{"content":"too late"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+
+        let provider = OpenRouterProvider::with_tools_timeout_and_base_url(
+            "key",
+            default_tools().specs(),
+            30,
+            format!("http://{}", addr),
+        );
+        let route = ModelRoute::default();
+        let cancel = CancellationToken::new();
+        let canceller = {
+            let cancel = cancel.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(100));
+                cancel.cancel();
+            })
+        };
+
+        let start = Instant::now();
+        let result =
+            provider.complete_with_cancel(&[Message::user("hello")], &route, Some(&cancel));
+        let elapsed = start.elapsed();
+
+        canceller.join().unwrap();
+        server.join().unwrap();
+
+        assert!(matches!(result, Err(Error::Stopped(_))));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "transport cancellation should stop quickly, took {:?}",
+            elapsed
+        );
     }
 }

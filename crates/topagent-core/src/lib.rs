@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod cancel;
 pub mod channel;
 pub mod commands;
 pub mod context;
@@ -10,6 +11,7 @@ pub mod message;
 pub mod model;
 pub mod openrouter;
 pub mod plan;
+pub mod progress;
 pub mod project;
 pub mod prompt;
 pub mod provider;
@@ -22,6 +24,7 @@ pub mod tool_spec;
 pub mod tools;
 
 pub use agent::{Agent, BashCommandClass, ExecutionStage};
+pub use cancel::CancellationToken;
 pub use channel::adapter::{ChannelAdapter, ChannelError, IncomingMessage, OutgoingMessage};
 pub use channel::telegram::TelegramAdapter;
 pub use context::ExecutionContext;
@@ -32,6 +35,7 @@ pub use message::{Content, Message, Role};
 pub use model::{ModelRoute, ProviderId, RoutingPolicy, TaskCategory};
 pub use openrouter::OpenRouterProvider;
 pub use plan::{Plan, TodoItem, TodoStatus};
+pub use progress::{ProgressCallback, ProgressKind, ProgressUpdate};
 pub use project::{
     get_project_instructions_or_error, load_project_instructions, ProjectInstructionResult,
 };

@@ -7,6 +7,7 @@ pub struct RuntimeOptions {
     pub max_read_bytes: usize,
     pub max_bash_output_bytes: usize,
     pub provider_timeout_secs: u64,
+    pub progress_heartbeat_secs: u64,
     pub max_messages_before_truncation: usize,
     pub require_plan: bool,
     pub task_category: TaskCategory,
@@ -23,6 +24,7 @@ impl Default for RuntimeOptions {
             max_read_bytes: 64 * 1024,
             max_bash_output_bytes: 64 * 1024,
             provider_timeout_secs: 120,
+            progress_heartbeat_secs: 2,
             max_messages_before_truncation: 100,
             require_plan: true,
             task_category: TaskCategory::Default,
@@ -60,6 +62,11 @@ impl RuntimeOptions {
 
     pub fn with_provider_timeout_secs(mut self, provider_timeout_secs: u64) -> Self {
         self.provider_timeout_secs = provider_timeout_secs;
+        self
+    }
+
+    pub fn with_progress_heartbeat_secs(mut self, progress_heartbeat_secs: u64) -> Self {
+        self.progress_heartbeat_secs = progress_heartbeat_secs;
         self
     }
 

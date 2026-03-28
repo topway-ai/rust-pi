@@ -4,8 +4,8 @@ use topagent_core::{
     context::ExecutionContext,
     model::TaskCategory,
     tools::{BashTool, EditTool, GitDiffTool, ReadTool, Tool, WriteTool},
-    Agent, Content, Error, ExecutionStage, Message, Provider, ProviderResponse, Role,
-    RuntimeOptions, TaskResult, ToolCallEntry,
+    Agent, CancellationToken, Content, Error, ExecutionStage, Message, ProgressKind,
+    ProgressUpdate, Provider, ProviderResponse, Role, RuntimeOptions, TaskResult, ToolCallEntry,
 };
 
 fn make_test_context() -> (ExecutionContext, TempDir) {
@@ -161,6 +161,18 @@ impl Provider for MalformedArgsProvider {
     }
 }
 
+fn capture_progress_updates() -> (
+    Arc<std::sync::Mutex<Vec<ProgressUpdate>>>,
+    topagent_core::ProgressCallback,
+) {
+    let updates = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = updates.clone();
+    let callback: topagent_core::ProgressCallback = Arc::new(move |update| {
+        sink.lock().unwrap().push(update);
+    });
+    (updates, callback)
+}
+
 #[test]
 fn test_agent_returns_final_response() {
     let (ctx, _temp) = make_test_context();
@@ -258,6 +270,149 @@ fn test_agent_empty_response_retries_then_succeeds() {
     let result = agent.run(&ctx, "test");
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "success after empty");
+}
+
+#[test]
+fn test_agent_surfaces_progress_for_tool_activity_and_completion() {
+    let (ctx, _temp) = make_test_context();
+    let responses = vec![
+        ProviderResponse::ToolCall {
+            id: "1".into(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "echo hello"}),
+        },
+        ProviderResponse::Message(Message::assistant("done")),
+    ];
+    let provider = topagent_core::ScriptedProvider::new(responses);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+    let (updates, callback) = capture_progress_updates();
+    agent.set_progress_callback(Some(callback));
+
+    let result = agent.run(&ctx, "inspect the repository");
+    assert!(result.is_ok());
+
+    let updates = updates.lock().unwrap();
+    assert!(updates.iter().any(|u| u.kind == ProgressKind::Received));
+    assert!(updates
+        .iter()
+        .any(|u| u.message.contains("Waiting for model response")));
+    assert!(updates
+        .iter()
+        .any(|u| u.message.contains("Running tool: bash")));
+    assert!(updates.iter().any(|u| u.kind == ProgressKind::Completed));
+}
+
+#[test]
+fn test_agent_surfaces_retry_progress() {
+    let (ctx, _temp) = make_test_context();
+    let responses = vec![ProviderResponse::Message(Message::assistant(
+        "Success after retry",
+    ))];
+    let provider = TransientFailProvider::new(1, responses);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+    let (updates, callback) = capture_progress_updates();
+    agent.set_progress_callback(Some(callback));
+
+    let result = agent.run(&ctx, "test retries");
+    assert!(result.is_ok());
+
+    let updates = updates.lock().unwrap();
+    assert!(updates
+        .iter()
+        .any(|u| u.kind == ProgressKind::Retrying && u.message.contains("retrying (1/3)")));
+    assert!(updates.iter().any(|u| u.kind == ProgressKind::Completed));
+}
+
+#[test]
+fn test_agent_surfaces_blocked_progress_when_planning_is_required() {
+    let (ctx, _temp) = make_test_context();
+    let responses = vec![
+        ProviderResponse::ToolCall {
+            id: "1".into(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "touch blocked.txt"}),
+        },
+        ProviderResponse::Message(Message::assistant("blocked")),
+    ];
+    let provider = topagent_core::ScriptedProvider::new(responses);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+    let (updates, callback) = capture_progress_updates();
+    agent.set_progress_callback(Some(callback));
+
+    let result = agent.run(&ctx, "implement a feature and then test it");
+    assert!(result.is_ok());
+
+    let updates = updates.lock().unwrap();
+    assert!(updates
+        .iter()
+        .any(|u| u.kind == ProgressKind::Blocked && u.message.contains("planning required")));
+}
+
+#[test]
+fn test_agent_surfaces_failed_progress_on_terminal_error() {
+    let (ctx, _temp) = make_test_context();
+    let provider = TransientFailProvider::new(
+        10,
+        vec![ProviderResponse::Message(Message::assistant(
+            "should not reach",
+        ))],
+    );
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+    let (updates, callback) = capture_progress_updates();
+    agent.set_progress_callback(Some(callback));
+
+    let result = agent.run(&ctx, "test repeated failure");
+    assert!(result.is_err());
+
+    let updates = updates.lock().unwrap();
+    assert!(updates.iter().any(|u| u.kind == ProgressKind::Failed));
+}
+
+#[test]
+fn test_agent_returns_stopped_when_cancelled_before_run() {
+    let (ctx, _temp) = make_test_context();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let ctx = ctx.with_cancel_token(cancel);
+    let provider = topagent_core::ScriptedProvider::new(vec![ProviderResponse::Message(
+        Message::assistant("should not run"),
+    )]);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+    let (updates, callback) = capture_progress_updates();
+    agent.set_progress_callback(Some(callback));
+
+    let result = agent.run(&ctx, "stop now");
+    assert!(matches!(result, Err(Error::Stopped(_))));
+
+    let updates = updates.lock().unwrap();
+    assert!(updates.iter().any(|u| u.kind == ProgressKind::Stopped));
+}
+
+#[test]
+fn test_agent_can_be_cancelled_during_bash_execution() {
+    let (ctx, _temp) = make_test_context();
+    let cancel = CancellationToken::new();
+    let ctx = ctx.with_cancel_token(cancel.clone());
+    let responses = vec![
+        ProviderResponse::ToolCall {
+            id: "1".into(),
+            name: "bash".into(),
+            args: serde_json::json!({"command": "sleep 5"}),
+        },
+        ProviderResponse::Message(Message::assistant("done")),
+    ];
+    let provider = topagent_core::ScriptedProvider::new(responses);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        cancel.cancel();
+    });
+
+    let result = agent.run(&ctx, "run a long command");
+    canceller.join().unwrap();
+
+    assert!(matches!(result, Err(Error::Stopped(_))));
 }
 
 #[test]

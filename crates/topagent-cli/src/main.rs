@@ -1,18 +1,29 @@
+// TopAgent CLI entry point - supports one-shot execution and Telegram bot mode.
+// Run: topagent "task" or topagent telegram
+mod progress;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    mpsc, Arc, Mutex,
+};
+use std::thread;
+use std::time::Duration;
 use topagent_core::{
     channel::{ChannelAdapter, OutgoingMessage},
     context::ExecutionContext,
     create_provider,
     model::{ModelRoute, ProviderId, RoutingPolicy, TaskCategory},
     tools::default_tools,
-    Agent, RuntimeOptions, TelegramAdapter,
+    Agent, CancellationToken, ProgressCallback, ProgressUpdate, RuntimeOptions, TelegramAdapter,
 };
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+
+use crate::progress::LiveProgress;
 
 #[derive(Parser)]
 #[command(
@@ -48,7 +59,7 @@ struct Cli {
         long = "workspace",
         alias = "cwd",
         global = true,
-        help = "Workspace/repo directory (or TOPAGENT_WORKSPACE)"
+        help = "Workspace/repo directory override"
     )]
     workspace: Option<PathBuf>,
 
@@ -151,17 +162,23 @@ fn build_runtime_options(
 }
 
 fn resolve_workspace_path(workspace: Option<PathBuf>) -> Result<PathBuf> {
-    let workspace = match workspace.or_else(|| std::env::var("TOPAGENT_WORKSPACE").ok().map(PathBuf::from)) {
+    resolve_workspace_path_with_current_dir(workspace, std::env::current_dir())
+}
+
+fn resolve_workspace_path_with_current_dir(
+    workspace: Option<PathBuf>,
+    current_dir: std::io::Result<PathBuf>,
+) -> Result<PathBuf> {
+    let workspace = match workspace {
         Some(path) => path,
-        None => std::env::current_dir()
-            .context(
-                "Failed to determine the current directory. Use --workspace /path/to/repo or set TOPAGENT_WORKSPACE.",
-            )?,
+        None => current_dir.context(
+            "Failed to determine the current directory. Run TopAgent from your repo or pass --workspace /path/to/repo.",
+        )?,
     };
 
     if !workspace.exists() {
         return Err(anyhow::anyhow!(
-            "Workspace path does not exist: {}. Use --workspace /path/to/repo or set TOPAGENT_WORKSPACE.",
+            "Workspace path does not exist: {}. Run TopAgent from a repo directory or pass --workspace /path/to/repo.",
             workspace.display()
         ));
     }
@@ -220,6 +237,24 @@ fn require_telegram_token(token: Option<String>) -> Result<String> {
     Ok(token)
 }
 
+fn install_ctrlc_handler(
+    cancel_token: CancellationToken,
+    progress_callback: ProgressCallback,
+) -> Result<()> {
+    let interrupt_count = Arc::new(AtomicUsize::new(0));
+    ctrlc::set_handler(move || {
+        let count = interrupt_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if count == 1 {
+            cancel_token.cancel();
+            progress_callback(ProgressUpdate::stopping());
+        } else {
+            eprintln!("status: forcing exit");
+            std::process::exit(130);
+        }
+    })
+    .context("Failed to install Ctrl-C handler")
+}
+
 fn run_one_shot(
     api_key: Option<String>,
     provider: String,
@@ -231,7 +266,8 @@ fn run_one_shot(
     instruction: String,
 ) -> Result<()> {
     let workspace = resolve_workspace_path(workspace)?;
-    let ctx = ExecutionContext::new(workspace);
+    let cancel_token = CancellationToken::new();
+    let ctx = ExecutionContext::new(workspace).with_cancel_token(cancel_token.clone());
     let options = build_runtime_options(max_steps, max_retries, timeout_secs);
     let route = build_route(provider, model)?;
     let api_key = require_openrouter_api_key(api_key)?;
@@ -251,12 +287,24 @@ fn run_one_shot(
         options.provider_timeout_secs,
     )?;
 
+    let heartbeat_interval = Duration::from_secs(options.progress_heartbeat_secs);
     let mut agent = Agent::with_options(provider, default_tools().into_inner(), options);
+    let progress = LiveProgress::for_cli(heartbeat_interval);
+    let progress_callback = progress.callback();
+    install_ctrlc_handler(cancel_token, progress_callback.clone())?;
+    agent.set_progress_callback(Some(progress_callback));
+    let result = agent.run(&ctx, &instruction);
+    agent.set_progress_callback(None);
+    progress.wait();
 
-    match agent.run(&ctx, &instruction) {
+    match result {
         Ok(result) => {
             println!("{}", result);
             Ok(())
+        }
+        Err(topagent_core::Error::Stopped(_)) => {
+            info!("one-shot run stopped by user");
+            std::process::exit(130);
         }
         Err(e) => {
             error!("agent error: {}", e);
@@ -328,14 +376,19 @@ fn run_telegram(
 
     let mut session_manager = ChatSessionManager::new(route, api_key, options);
     let offset = Arc::new(Mutex::new(0i64));
+    let mut polling_retries = 0usize;
 
     info!("telegram polling started");
 
     loop {
+        session_manager.collect_finished_tasks();
         let current_offset = { *offset.lock().unwrap() };
         match adapter.get_updates(Some(current_offset), Some(30), Some(&["message"])) {
             Ok(updates) => {
+                polling_retries = 0;
+                session_manager.collect_finished_tasks();
                 for update in updates {
+                    session_manager.collect_finished_tasks();
                     let Some(msg) = &update.message else { continue };
                     *offset.lock().unwrap() = update.update_id + 1;
                     let chat_id = msg.chat.id;
@@ -378,6 +431,7 @@ fn run_telegram(
                                  Mode: private text chats only\n\n\
                                  Commands:\n\
                                  /help - show this message\n\
+                                 /stop - stop the current task\n\
                                  /reset - clear conversation history\n\n\
                                  Try this first message:\n\
                                  Summarize this repository and tell me the main entry points.",
@@ -388,6 +442,7 @@ fn run_telegram(
                                 "TopAgent\n\n\
                                  Workspace: {}\n\
                                  Send a plain text task about this workspace.\n\
+                                 /stop requests cancellation of the current task.\n\
                                  /reset clears your conversation history.",
                                 workspace_label
                             )
@@ -402,40 +457,53 @@ fn run_telegram(
                         continue;
                     }
 
-                    if text == "/reset" {
-                        session_manager.reset_chat(chat_id);
-                        let outgoing = OutgoingMessage {
-                            chat_id,
-                            text: "Conversation history cleared.".to_string(),
+                    if text == "/stop" {
+                        let reply = if session_manager.stop_chat(chat_id) {
+                            "Stopping current task...".to_string()
+                        } else {
+                            "No task is currently running.".to_string()
                         };
-                        if let Err(e) = adapter.send_message(outgoing) {
-                            error!("failed to send message: {}", e);
-                        }
+                        send_telegram_chunks(&adapter, chat_id, vec![reply]);
                         continue;
                     }
 
-                    let response = session_manager.process_message(&ctx, chat_id, text);
-
-                    for chunk in response {
-                        let outgoing = OutgoingMessage {
-                            chat_id,
-                            text: chunk,
+                    if text == "/reset" {
+                        let reply = if session_manager.is_task_running(chat_id) {
+                            "A task is still running. Send /stop and wait for it to finish before /reset."
+                                .to_string()
+                        } else {
+                            session_manager.reset_chat(chat_id);
+                            "Conversation history cleared.".to_string()
                         };
-                        if let Err(e) = adapter.send_message(outgoing) {
-                            error!("failed to send message: {}", e);
-                        }
+                        send_telegram_chunks(&adapter, chat_id, vec![reply]);
+                        continue;
                     }
 
+                    let response = session_manager.start_message(&ctx, &adapter, chat_id, text);
+                    send_telegram_chunks(&adapter, chat_id, response);
                     let _ = adapter.acknowledge(chat_id, message_id);
                 }
             }
             Err(e) => {
+                polling_retries += 1;
                 error!(
-                    "failed to get Telegram updates: {}. Retrying in 5 seconds.",
-                    e
+                    "failed to get Telegram updates: {}. Retrying in 5 seconds (attempt {}).",
+                    e, polling_retries
                 );
                 std::thread::sleep(std::time::Duration::from_secs(5));
             }
+        }
+    }
+}
+
+fn send_telegram_chunks(adapter: &TelegramAdapter, chat_id: i64, chunks: Vec<String>) {
+    for chunk in chunks {
+        let outgoing = OutgoingMessage {
+            chat_id,
+            text: chunk,
+        };
+        if let Err(e) = adapter.send_message(outgoing) {
+            error!("failed to send message: {}", e);
         }
     }
 }
@@ -445,57 +513,255 @@ struct ChatSessionManager {
     api_key: String,
     options: RuntimeOptions,
     sessions: HashMap<i64, SessionState>,
+    completed_tx: mpsc::Sender<CompletedChatTask>,
+    completed_rx: mpsc::Receiver<CompletedChatTask>,
 }
 
-struct SessionState {
+enum SessionState {
+    Idle(Agent),
+    Running(RunningChatTask),
+}
+
+struct RunningChatTask {
+    cancel_token: CancellationToken,
+    progress_callback: Option<ProgressCallback>,
+}
+
+struct CompletedChatTask {
+    chat_id: i64,
     agent: Agent,
 }
 
 impl ChatSessionManager {
     fn new(route: ModelRoute, api_key: String, options: RuntimeOptions) -> Self {
+        let (completed_tx, completed_rx) = mpsc::channel();
         Self {
             route,
             api_key,
             options,
             sessions: HashMap::new(),
+            completed_tx,
+            completed_rx,
         }
     }
 
-    fn get_or_create_session(&mut self, chat_id: i64) -> &mut Agent {
-        if !self.sessions.contains_key(&chat_id) {
-            let provider = create_provider(
-                &self.route,
-                &self.api_key,
-                default_tools().specs(),
-                self.options.provider_timeout_secs,
-            )
-            .expect("failed to create provider");
-            let tools = default_tools();
-            let agent = Agent::with_options(provider, tools.into_inner(), self.options.clone());
-            self.sessions.insert(chat_id, SessionState { agent });
+    fn create_agent(&self) -> Agent {
+        let provider = create_provider(
+            &self.route,
+            &self.api_key,
+            default_tools().specs(),
+            self.options.provider_timeout_secs,
+        )
+        .expect("failed to create provider");
+        let tools = default_tools();
+        Agent::with_options(provider, tools.into_inner(), self.options.clone())
+    }
+
+    fn collect_finished_tasks(&mut self) {
+        while let Ok(task) = self.completed_rx.try_recv() {
+            self.sessions
+                .insert(task.chat_id, SessionState::Idle(task.agent));
         }
-        &mut self.sessions.get_mut(&chat_id).unwrap().agent
+    }
+
+    fn is_task_running(&self, chat_id: i64) -> bool {
+        matches!(self.sessions.get(&chat_id), Some(SessionState::Running(_)))
+    }
+
+    fn stop_chat(&mut self, chat_id: i64) -> bool {
+        let Some(SessionState::Running(task)) = self.sessions.get(&chat_id) else {
+            return false;
+        };
+
+        task.cancel_token.cancel();
+        if let Some(callback) = &task.progress_callback {
+            callback(ProgressUpdate::stopping());
+        }
+        true
     }
 
     fn reset_chat(&mut self, chat_id: i64) {
         self.sessions.remove(&chat_id);
     }
 
-    fn process_message(&mut self, ctx: &ExecutionContext, chat_id: i64, text: &str) -> Vec<String> {
-        let agent = self.get_or_create_session(chat_id);
+    fn start_message(
+        &mut self,
+        ctx: &ExecutionContext,
+        adapter: &TelegramAdapter,
+        chat_id: i64,
+        text: &str,
+    ) -> Vec<String> {
+        self.collect_finished_tasks();
+        if self.is_task_running(chat_id) {
+            return vec![
+                "A task is already running in this chat. Send /stop to cancel it or wait for it to finish."
+                    .to_string(),
+            ];
+        }
 
-        match agent.run(ctx, text) {
-            Ok(response) => {
-                let max_len = 4000;
-                if response.len() <= max_len {
-                    vec![response]
-                } else {
-                    topagent_core::channel::telegram::chunk_text(&response, max_len)
+        let heartbeat_interval = Duration::from_secs(self.options.progress_heartbeat_secs);
+        let mut agent = match self.sessions.remove(&chat_id) {
+            Some(SessionState::Idle(agent)) => agent,
+            Some(SessionState::Running(task)) => {
+                self.sessions.insert(chat_id, SessionState::Running(task));
+                return vec![
+                    "A task is already running in this chat. Send /stop to cancel it or wait for it to finish."
+                        .to_string(),
+                ];
+            }
+            None => self.create_agent(),
+        };
+
+        let cancel_token = CancellationToken::new();
+        let run_ctx = ctx.clone().with_cancel_token(cancel_token.clone());
+        let progress =
+            match LiveProgress::for_telegram(heartbeat_interval, adapter.clone(), chat_id) {
+                Ok(progress) => Some(progress),
+                Err(err) => {
+                    error!("failed to start Telegram live progress: {}", err);
+                    None
+                }
+            };
+        let progress_callback = progress.as_ref().map(|progress| progress.callback());
+        let worker_progress_callback = progress_callback.clone();
+        let completed_tx = self.completed_tx.clone();
+        let adapter = adapter.clone();
+        let instruction = text.to_string();
+
+        thread::spawn(move || {
+            if let Some(callback) = &worker_progress_callback {
+                agent.set_progress_callback(Some(callback.clone()));
+            }
+
+            let result = agent.run(&run_ctx, &instruction);
+            agent.set_progress_callback(None);
+
+            if let Some(progress) = progress {
+                progress.wait();
+            }
+
+            match result {
+                Ok(response) => {
+                    let max_len = 4000;
+                    let chunks = if response.len() <= max_len {
+                        vec![response]
+                    } else {
+                        topagent_core::channel::telegram::chunk_text(&response, max_len)
+                    };
+                    send_telegram_chunks(&adapter, chat_id, chunks);
+                }
+                Err(topagent_core::Error::Stopped(_)) => {}
+                Err(e) => {
+                    send_telegram_chunks(&adapter, chat_id, vec![format!("Error: {}", e)]);
                 }
             }
-            Err(e) => {
-                vec![format!("Error: {}", e)]
-            }
-        }
+
+            let _ = completed_tx.send(CompletedChatTask { chat_id, agent });
+        });
+
+        self.sessions.insert(
+            chat_id,
+            SessionState::Running(RunningChatTask {
+                cancel_token,
+                progress_callback,
+            }),
+        );
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        resolve_workspace_path_with_current_dir, ChatSessionManager, RunningChatTask, SessionState,
+    };
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+    use topagent_core::{CancellationToken, ModelRoute, ProgressUpdate, RuntimeOptions};
+
+    #[test]
+    fn test_workspace_defaults_to_current_directory_for_one_shot_and_telegram() {
+        let temp = TempDir::new().unwrap();
+        let resolved =
+            resolve_workspace_path_with_current_dir(None, Ok(temp.path().to_path_buf())).unwrap();
+        assert_eq!(resolved, temp.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_workspace_override_beats_current_directory_for_one_shot_and_telegram() {
+        let current = TempDir::new().unwrap();
+        let override_dir = TempDir::new().unwrap();
+        let resolved = resolve_workspace_path_with_current_dir(
+            Some(override_dir.path().to_path_buf()),
+            Ok(current.path().to_path_buf()),
+        )
+        .unwrap();
+        assert_eq!(resolved, override_dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_workspace_resolution_fails_when_current_directory_is_unavailable() {
+        let err = resolve_workspace_path_with_current_dir(
+            None,
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "current directory missing",
+            )),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("Failed to determine the current directory"));
+    }
+
+    #[test]
+    fn test_workspace_override_ignores_invalid_current_directory() {
+        let override_dir = TempDir::new().unwrap();
+        let resolved = resolve_workspace_path_with_current_dir(
+            Some(PathBuf::from(override_dir.path())),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "current directory missing",
+            )),
+        )
+        .unwrap();
+        assert_eq!(resolved, override_dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_stop_chat_cancels_running_task_and_emits_stopping_progress() {
+        let route = ModelRoute::openrouter("test-model");
+        let mut manager =
+            ChatSessionManager::new(route, "test-key".to_string(), RuntimeOptions::default());
+        let cancel_token = CancellationToken::new();
+        let updates = Arc::new(Mutex::new(Vec::<ProgressUpdate>::new()));
+        let sink = updates.clone();
+        let progress_callback: topagent_core::ProgressCallback = Arc::new(move |update| {
+            sink.lock().unwrap().push(update);
+        });
+
+        manager.sessions.insert(
+            42,
+            SessionState::Running(RunningChatTask {
+                cancel_token: cancel_token.clone(),
+                progress_callback: Some(progress_callback),
+            }),
+        );
+
+        assert!(manager.stop_chat(42));
+        assert!(cancel_token.is_cancelled());
+        assert!(updates
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|update| update == &ProgressUpdate::stopping()));
+    }
+
+    #[test]
+    fn test_stop_chat_returns_false_when_idle() {
+        let route = ModelRoute::openrouter("test-model");
+        let mut manager =
+            ChatSessionManager::new(route, "test-key".to_string(), RuntimeOptions::default());
+        assert!(!manager.stop_chat(42));
     }
 }

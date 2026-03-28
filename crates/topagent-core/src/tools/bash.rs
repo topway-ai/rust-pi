@@ -2,7 +2,10 @@ use crate::context::ToolContext;
 use crate::tool_spec::ToolSpec;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::process::{Command, Output};
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BashArgs {
@@ -32,12 +35,73 @@ impl crate::tools::Tool for BashTool {
     fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<String> {
         let args: BashArgs =
             serde_json::from_value(args).map_err(|e| Error::InvalidInput(e.to_string()))?;
-        let output = Command::new("sh")
+        if ctx.exec.is_cancelled() {
+            return Err(Error::Stopped("user requested stop".into()));
+        }
+
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(&args.command)
             .current_dir(&ctx.exec.workspace_root)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| Error::ToolFailed(format!("failed to execute command: {}", e)))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::ToolFailed("failed to capture stdout".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| Error::ToolFailed("failed to capture stderr".into()))?;
+
+        let stdout_reader = thread::spawn(move || {
+            let mut stdout = stdout;
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf);
+            buf
+        });
+        let stderr_reader = thread::spawn(move || {
+            let mut stderr = stderr;
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf);
+            buf
+        });
+
+        let status = loop {
+            if ctx.exec.is_cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(Error::Stopped("user requested stop".into()));
+            }
+
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => thread::sleep(Duration::from_millis(100)),
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    return Err(Error::ToolFailed(format!(
+                        "failed while waiting for command: {}",
+                        e
+                    )));
+                }
+            }
+        };
+
+        let stdout = stdout_reader.join().unwrap_or_default();
+        let stderr = stderr_reader.join().unwrap_or_default();
+        let output = Output {
+            status,
+            stdout,
+            stderr,
+        };
         format_output_with_limit(output, ctx.runtime.max_bash_output_bytes)
     }
 }
@@ -103,6 +167,7 @@ mod tests {
     use crate::context::{ExecutionContext, ToolContext};
     use crate::runtime::RuntimeOptions;
     use crate::tools::Tool;
+    use crate::CancellationToken;
     use tempfile::TempDir;
 
     #[test]
@@ -177,5 +242,26 @@ mod tests {
             "output should be truncated: {}",
             output
         );
+    }
+
+    #[test]
+    fn test_bash_can_be_cancelled() {
+        let temp = TempDir::new().unwrap();
+        let cancel = CancellationToken::new();
+        let exec =
+            ExecutionContext::new(temp.path().to_path_buf()).with_cancel_token(cancel.clone());
+        let runtime = RuntimeOptions::default();
+        let ctx = ToolContext::new(&exec, &runtime);
+        let tool = BashTool::new();
+
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            cancel.cancel();
+        });
+
+        let result = tool.execute(serde_json::json!({"command": "sleep 5"}), &ctx);
+        canceller.join().unwrap();
+
+        assert!(matches!(result, Err(Error::Stopped(_))));
     }
 }

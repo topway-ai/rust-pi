@@ -1,8 +1,18 @@
-use crate::{Error, Message, ModelRoute, Result};
+use crate::{CancellationToken, Error, Message, ModelRoute, Result};
 use std::sync::{Arc, RwLock};
 
 pub trait Provider: Send + Sync {
     fn complete(&self, messages: &[Message], route: &ModelRoute) -> Result<ProviderResponse>;
+
+    fn complete_with_cancel(
+        &self,
+        messages: &[Message],
+        route: &ModelRoute,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<ProviderResponse> {
+        let _ = cancel;
+        self.complete(messages, route)
+    }
 }
 
 #[derive(Debug, Clone)]

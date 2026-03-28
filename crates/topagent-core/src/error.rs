@@ -38,6 +38,9 @@ pub enum Error {
     #[error("max steps reached: {0}")]
     MaxStepsReached(String),
 
+    #[error("stopped: {0}")]
+    Stopped(String),
+
     #[error("project instruction error: {0}")]
     ProjectInstruction(String),
 

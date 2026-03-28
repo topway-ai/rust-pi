@@ -117,6 +117,41 @@ impl TelegramAdapter {
         Ok(response.result)
     }
 
+    pub fn edit_message_text(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+    ) -> Result<TelegramMessage, ChannelError> {
+        #[derive(Serialize)]
+        struct EditMessageParams {
+            chat_id: i64,
+            message_id: i64,
+            text: String,
+        }
+
+        let params = EditMessageParams {
+            chat_id,
+            message_id,
+            text: text.to_string(),
+        };
+
+        let response = self
+            .client
+            .post(self.api_url("editMessageText"))
+            .json(&params)
+            .send()?
+            .json::<TelegramResponse<TelegramMessage>>()?;
+
+        if !response.ok {
+            return Err(ChannelError::Telegram(
+                response.description.unwrap_or_default(),
+            ));
+        }
+
+        Ok(response.result)
+    }
+
     pub fn check_webhook(&self) -> Result<bool, ChannelError> {
         #[derive(Deserialize)]
         struct WebhookInfo {

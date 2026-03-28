@@ -10,18 +10,21 @@ Configure once:
 
 ```bash
 export OPENROUTER_API_KEY="your_openrouter_key"
-export TOPAGENT_WORKSPACE="$HOME/path/to/your/repo"
 ```
 
 First local run:
 
 ```bash
+cd /path/to/your/repo
 topagent "summarize this repository"
 ```
+
+Press `Ctrl-C` once to request a stop. Press it again to force exit.
 
 Telegram first test:
 
 ```bash
+cd /path/to/your/repo
 export TELEGRAM_BOT_TOKEN="123456:ABCdefYourBotToken"
 topagent telegram
 ```
@@ -31,6 +34,7 @@ Then:
 1. Open a private chat with your bot.
 2. Send `/start` and confirm the workspace path is correct.
 3. Send: `Summarize this repository and tell me the main entry points.`
+4. Send `/stop` if you want to cancel the current task.
 
 If this fails:
 
@@ -44,7 +48,7 @@ If this fails:
   Export `OPENROUTER_API_KEY`
 
 - `Workspace path does not exist`
-  Fix `TOPAGENT_WORKSPACE` or pass `--workspace /path/to/repo`
+  Run TopAgent from the repo you want to use, or pass `--workspace /path/to/repo`
 
 - `Telegram bot token required` or `Telegram bot token looks invalid`
   Export a real `TELEGRAM_BOT_TOKEN` from BotFather

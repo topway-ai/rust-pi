@@ -46,18 +46,6 @@ fn test_cli_invalid_workspace_fails_fast() {
 }
 
 #[test]
-fn test_cli_workspace_env_fails_fast() {
-    let mut cmd = Command::cargo_bin("topagent").unwrap();
-    cmd.env("TOPAGENT_WORKSPACE", "/definitely/missing/path")
-        .args(["--api-key", "test-key", "say hello"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "Workspace path does not exist: /definitely/missing/path",
-        ));
-}
-
-#[test]
 fn test_cli_telegram_requires_token() {
     let mut cmd = Command::cargo_bin("topagent").unwrap();
     cmd.env_remove("TELEGRAM_BOT_TOKEN")
@@ -106,4 +94,24 @@ fn test_install_script_has_valid_syntax() {
 
     let mut cmd = Command::new("bash");
     cmd.arg("-n").arg(script).assert().success();
+}
+
+#[test]
+fn test_readme_uses_cd_into_repo_instead_of_workspace_env() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let readme = std::fs::read_to_string(repo_root.join("README.md")).unwrap();
+
+    assert!(readme.contains("cd /path/to/your/repo"));
+    assert!(!readme.contains("TOPAGENT_WORKSPACE"));
+}
+
+#[test]
+fn test_install_script_output_no_longer_teaches_workspace_env() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let script = std::fs::read_to_string(repo_root.join("scripts/install.sh")).unwrap();
+
+    assert!(script.contains("cd /path/to/your/repo"));
+    assert!(!script.contains("TOPAGENT_WORKSPACE"));
 }

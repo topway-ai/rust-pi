@@ -83,10 +83,11 @@ TopAgent installed.
 
 Next:
   export OPENROUTER_API_KEY="your_openrouter_key"
-  export TOPAGENT_WORKSPACE="/path/to/your/repo"
+  cd /path/to/your/repo
   topagent "summarize this repository"
 
 Telegram test:
+  cd /path/to/your/repo
   export TELEGRAM_BOT_TOKEN="123456:ABCdefYourBotToken"
   topagent telegram
 

@@ -3,6 +3,7 @@ use crate::external::ExternalToolRegistry;
 use crate::hooks::HookRegistry;
 use crate::model::{ModelRoute, RoutingPolicy};
 use crate::plan::{should_require_research_plan_build, Plan};
+use crate::progress::{ProgressCallback, ProgressUpdate};
 use crate::project::get_project_instructions_or_error;
 use crate::prompt;
 use crate::runtime::RuntimeOptions;
@@ -36,6 +37,7 @@ pub struct Agent {
     execution_stage: ExecutionStage,
     external_tool_ran: RefCell<bool>,
     run_baseline: RefCell<Option<RunBaseline>>,
+    progress_callback: Option<ProgressCallback>,
 }
 
 struct RunBaseline {
@@ -111,6 +113,7 @@ impl Agent {
             execution_stage: ExecutionStage::Research,
             external_tool_ran: RefCell::new(false),
             run_baseline: RefCell::new(None),
+            progress_callback: None,
         }
     }
 
@@ -140,6 +143,80 @@ impl Agent {
 
     pub fn changed_files(&self) -> Vec<String> {
         self.changed_files.borrow().clone()
+    }
+
+    pub fn set_progress_callback(&mut self, callback: Option<ProgressCallback>) {
+        self.progress_callback = callback;
+    }
+
+    fn emit_progress(&self, update: ProgressUpdate) {
+        if let Some(callback) = &self.progress_callback {
+            callback(update);
+        }
+    }
+
+    fn current_progress_phase(&self) -> &'static str {
+        if self.planning_gate_active {
+            return "planning";
+        }
+
+        match self.execution_stage {
+            ExecutionStage::Research => "researching",
+            ExecutionStage::Edit => "editing",
+            ExecutionStage::Review => "verifying",
+        }
+    }
+
+    fn current_working_progress(&self) -> ProgressUpdate {
+        if self.planning_gate_active {
+            return ProgressUpdate::planning();
+        }
+
+        match self.execution_stage {
+            ExecutionStage::Research => ProgressUpdate::researching(),
+            ExecutionStage::Edit => ProgressUpdate::editing(),
+            ExecutionStage::Review => ProgressUpdate::verifying(),
+        }
+    }
+
+    fn tool_progress(&self, name: &str, args: &serde_json::Value) -> ProgressUpdate {
+        if Self::is_plan_tool(name) {
+            return ProgressUpdate::planning();
+        }
+
+        if name == "bash" {
+            let bash_cmd = Self::extract_bash_command(args);
+            return match Self::classify_bash_command(&bash_cmd) {
+                BashCommandClass::Verification => {
+                    ProgressUpdate::working(format!("Running tool: bash (verification)"))
+                }
+                _ => ProgressUpdate::running_tool("bash"),
+            };
+        }
+
+        match name {
+            "write" | "edit" | "git_add" | "git_commit" => ProgressUpdate::running_tool(name),
+            _ => ProgressUpdate::running_tool(name),
+        }
+    }
+
+    fn blocked_progress(reason: &str) -> ProgressUpdate {
+        if reason.contains("Planning required") {
+            ProgressUpdate::blocked("Blocked: planning required before mutation.")
+        } else {
+            ProgressUpdate::blocked(format!("Blocked: {}", reason))
+        }
+    }
+
+    fn stop_error() -> Error {
+        Error::Stopped("user requested stop".to_string())
+    }
+
+    fn check_cancelled(&self, ctx: &ExecutionContext) -> Result<()> {
+        if ctx.is_cancelled() {
+            return Err(Self::stop_error());
+        }
+        Ok(())
     }
 
     fn track_changed_file(&self, tool_name: &str, args: &serde_json::Value) {
@@ -544,6 +621,19 @@ impl Agent {
     }
 
     pub fn run(&mut self, ctx: &ExecutionContext, instruction: &str) -> Result<String> {
+        self.emit_progress(ProgressUpdate::received());
+
+        let result = self.run_inner(ctx, instruction);
+        match &result {
+            Ok(_) => self.emit_progress(ProgressUpdate::completed()),
+            Err(Error::Stopped(_)) => self.emit_progress(ProgressUpdate::stopped()),
+            Err(err) => self.emit_progress(ProgressUpdate::failed(err.to_string())),
+        }
+        result
+    }
+
+    fn run_inner(&mut self, ctx: &ExecutionContext, instruction: &str) -> Result<String> {
+        self.check_cancelled(ctx)?;
         self.external_tools = ExternalToolRegistry::new();
         self.load_commands_from_workspace(&ctx.workspace_root)?;
         self.load_generated_tools_from_workspace(&ctx.workspace_root)?;
@@ -558,6 +648,7 @@ impl Agent {
             self.options.require_plan && should_require_research_plan_build(instruction);
 
         self.execution_stage = ExecutionStage::Research;
+        self.emit_progress(self.current_working_progress());
 
         self.session.add_message(Message::user(instruction));
 
@@ -602,6 +693,7 @@ impl Agent {
         let mut empty_response_retries = 0;
 
         loop {
+            self.check_cancelled(ctx)?;
             if steps >= self.options.max_steps {
                 return Err(Error::MaxStepsReached(format!(
                     "max steps ({}) reached without completing task",
@@ -609,12 +701,22 @@ impl Agent {
                 )));
             }
 
-            let response = match self
-                .provider
-                .complete(&self.session.messages(), &self.get_route())
-            {
-                Ok(r) => r,
+            self.emit_progress(ProgressUpdate::waiting_for_model(
+                self.current_progress_phase(),
+            ));
+            let response = match self.provider.complete_with_cancel(
+                &self.session.messages(),
+                &self.get_route(),
+                ctx.cancel_token(),
+            ) {
+                Ok(r) => {
+                    self.check_cancelled(ctx)?;
+                    r
+                }
                 Err(e) => {
+                    if ctx.is_cancelled() {
+                        return Err(Self::stop_error());
+                    }
                     if empty_response_retries >= self.options.max_provider_retries {
                         return Err(Error::ProviderRetryExhausted(format!(
                             "provider failed after {} retries: {}",
@@ -628,6 +730,10 @@ impl Agent {
                             empty_response_retries, e
                         )));
                     }
+                    self.emit_progress(ProgressUpdate::retrying_provider(
+                        empty_response_retries,
+                        self.options.max_provider_retries,
+                    ));
                     continue;
                 }
             };
@@ -645,6 +751,10 @@ impl Agent {
                                 ));
                             }
                             empty_response_retries += 1;
+                            self.emit_progress(ProgressUpdate::retrying_empty_response(
+                                empty_response_retries,
+                                self.options.max_provider_retries,
+                            ));
                             continue;
                         }
                         self.session.add_message(msg);
@@ -678,6 +788,7 @@ impl Agent {
                                 }
                             }
                             if let Some(block_msg) = self.check_planning_gate(&name, None) {
+                                self.emit_progress(Self::blocked_progress(&block_msg));
                                 self.session.add_message(Message::tool_request(
                                     id.clone(),
                                     name.clone(),
@@ -687,7 +798,10 @@ impl Agent {
                                     .add_message(Message::tool_result(id, block_msg));
                                 continue;
                             }
+                            self.emit_progress(self.tool_progress(&name, &args));
+                            self.check_cancelled(ctx)?;
                             let result = external_tool.execute(&args, &tool_ctx);
+                            self.check_cancelled(ctx)?;
                             *self.external_tool_ran.borrow_mut() = true;
                             let found_new_change =
                                 self.reconcile_changed_files(&ctx.workspace_root);
@@ -760,6 +874,7 @@ impl Agent {
 
                     let bash_args = if name == "bash" { Some(&args) } else { None };
                     if let Some(block_msg) = self.check_planning_gate(&name, bash_args) {
+                        self.emit_progress(Self::blocked_progress(&block_msg));
                         self.session.add_message(Message::tool_request(
                             id.clone(),
                             name.clone(),
@@ -776,6 +891,8 @@ impl Agent {
                     } else {
                         None
                     };
+                    self.emit_progress(self.tool_progress(&name, &args));
+                    self.check_cancelled(ctx)?;
                     let mut result = match tool.execute(args.clone(), &tool_ctx) {
                         Ok(r) => r,
                         Err(e) => {
@@ -791,6 +908,7 @@ impl Agent {
                             continue;
                         }
                     };
+                    self.check_cancelled(ctx)?;
 
                     if name == "bash" {
                         let class = if let Some(cmd_str) = &bash_cmd {
@@ -879,6 +997,7 @@ impl Agent {
                                     }
                                 }
                                 if let Some(block_msg) = self.check_planning_gate(&name, None) {
+                                    self.emit_progress(Self::blocked_progress(&block_msg));
                                     self.session.add_message(Message::tool_request(
                                         id.clone(),
                                         name.clone(),
@@ -888,7 +1007,10 @@ impl Agent {
                                         .add_message(Message::tool_result(id, block_msg));
                                     continue;
                                 }
+                                self.emit_progress(self.tool_progress(&name, &args));
+                                self.check_cancelled(ctx)?;
                                 let result = external_tool.execute(&args, &tool_ctx);
+                                self.check_cancelled(ctx)?;
                                 *self.external_tool_ran.borrow_mut() = true;
                                 let found_new_change =
                                     self.reconcile_changed_files(&ctx.workspace_root);
@@ -947,6 +1069,7 @@ impl Agent {
 
                         let bash_args = if name == "bash" { Some(&args) } else { None };
                         if let Some(block_msg) = self.check_planning_gate(&name, bash_args) {
+                            self.emit_progress(Self::blocked_progress(&block_msg));
                             self.session.add_message(Message::tool_request(
                                 id.clone(),
                                 name.clone(),
@@ -962,6 +1085,8 @@ impl Agent {
                         } else {
                             None
                         };
+                        self.emit_progress(self.tool_progress(&name, &args));
+                        self.check_cancelled(ctx)?;
                         let mut result = match tool.execute(args.clone(), &tool_ctx) {
                             Ok(r) => r,
                             Err(e) => {
@@ -977,6 +1102,7 @@ impl Agent {
                                 continue;
                             }
                         };
+                        self.check_cancelled(ctx)?;
 
                         if name == "bash" {
                             let class = if let Some(cmd_str) = &bash_cmd {
