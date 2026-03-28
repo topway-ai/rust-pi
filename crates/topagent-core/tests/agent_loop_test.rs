@@ -344,7 +344,7 @@ fn test_agent_surfaces_blocked_progress_when_planning_is_required() {
     let (updates, callback) = capture_progress_updates();
     agent.set_progress_callback(Some(callback));
 
-    let result = agent.run(&ctx, "implement a feature and then test it");
+    let result = agent.run(&ctx, "refactor the entire codebase");
     assert!(result.is_ok());
 
     let updates = updates.lock().unwrap();
@@ -1474,9 +1474,11 @@ fn test_unsafe_bash_allowed_after_plan_exists() {
 }
 
 #[test]
-fn test_repeated_planning_blocks_fail_clearly_instead_of_looping() {
+fn test_repeated_planning_blocks_auto_create_plan_and_recover() {
     let (ctx, _temp) = make_test_context();
     let options = RuntimeOptions::new().with_require_plan(true);
+    // Writes 1-5 are blocked (the 5th triggers auto-plan after being blocked).
+    // Write 6 succeeds because the gate is now open. Then the text response ends the run.
     let provider = BasicTestProvider::new(vec![
         ProviderResponse::ToolCall {
             id: "1".to_string(),
@@ -1488,24 +1490,41 @@ fn test_repeated_planning_blocks_fail_clearly_instead_of_looping() {
             name: "write".to_string(),
             args: serde_json::json!({"path": "blocked-2.txt", "content": "two"}),
         },
+        ProviderResponse::ToolCall {
+            id: "3".to_string(),
+            name: "write".to_string(),
+            args: serde_json::json!({"path": "blocked-3.txt", "content": "three"}),
+        },
+        ProviderResponse::ToolCall {
+            id: "4".to_string(),
+            name: "write".to_string(),
+            args: serde_json::json!({"path": "blocked-4.txt", "content": "four"}),
+        },
+        ProviderResponse::ToolCall {
+            id: "5".to_string(),
+            name: "write".to_string(),
+            args: serde_json::json!({"path": "blocked-5.txt", "content": "five"}),
+        },
+        ProviderResponse::ToolCall {
+            id: "6".to_string(),
+            name: "write".to_string(),
+            args: serde_json::json!({"path": "recovered.txt", "content": "recovered"}),
+        },
+        ProviderResponse::Message(Message::assistant(
+            "Auto-plan recovered the task.".to_string(),
+        )),
     ]);
     let mut agent = Agent::with_options(Box::new(provider), make_tools(), options);
 
     let result = agent.run(&ctx, "refactor the entire codebase and then test it");
 
-    assert!(result.is_err());
-    let error = result.unwrap_err().to_string();
-    assert!(
-        error.contains("planning is required")
-            || error.contains("no plan could be created")
-            || error.contains("task is blocked"),
-        "unexpected error: {}",
-        error
-    );
+    // With auto-plan, the task recovers instead of failing.
+    assert!(result.is_ok());
+    assert!(ctx.workspace_root.join("recovered.txt").exists());
 }
 
 #[test]
-fn test_planning_failure_reports_failed_not_completed() {
+fn test_blocked_write_then_text_response_still_completes() {
     let (ctx, _temp) = make_test_context();
     let options = RuntimeOptions::new().with_require_plan(true);
     let provider = BasicTestProvider::new(vec![
@@ -1524,11 +1543,11 @@ fn test_planning_failure_reports_failed_not_completed() {
 
     let result = agent.run(&ctx, "refactor the entire codebase and then test it");
 
-    assert!(result.is_err());
+    // With auto-plan on deadlock, a single blocked write followed by a text
+    // response completes successfully — no planning failure.
+    assert!(result.is_ok());
     let updates = updates.lock().unwrap();
     assert!(updates.iter().any(|u| u.kind == ProgressKind::Blocked));
-    assert!(updates.iter().any(|u| u.kind == ProgressKind::Failed));
-    assert!(!updates.iter().any(|u| u.kind == ProgressKind::Completed));
 }
 
 #[test]

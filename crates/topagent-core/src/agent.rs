@@ -2,7 +2,7 @@ use crate::context::{ExecutionContext, ToolContext};
 use crate::external::ExternalToolRegistry;
 use crate::hooks::HookRegistry;
 use crate::model::{ModelRoute, RoutingPolicy};
-use crate::plan::{should_require_research_plan_build, Plan};
+use crate::plan::{self, Plan};
 use crate::progress::{ProgressCallback, ProgressUpdate};
 use crate::project::get_project_instructions_or_error;
 use crate::prompt;
@@ -223,11 +223,47 @@ impl Agent {
             .unwrap_or(false)
     }
 
-    fn planning_deadlock_error() -> Error {
-        Error::Session(
-            "planning is required for this task, but no plan could be created; task is blocked"
-                .to_string(),
-        )
+    /// Classify whether the task requires upfront planning.
+    ///
+    /// Uses a two-tier system:
+    /// 1. Heuristic fast path for clear-cut cases (instant, no API call).
+    /// 2. Lightweight LLM classification call for ambiguous cases.
+    ///
+    /// Falls back to `false` (direct execution) if the LLM call fails.
+    fn classify_task(&self, instruction: &str) -> bool {
+        match plan::heuristic_fast_path(instruction) {
+            Some(result) => result,
+            None => self.classify_task_with_llm(instruction),
+        }
+    }
+
+    fn classify_task_with_llm(&self, instruction: &str) -> bool {
+        let (system_prompt, user_msg) = plan::build_classification_messages(instruction);
+        let messages = vec![Message::system(system_prompt), Message::user(user_msg)];
+        let route = self.resolved_route.clone();
+
+        match self.provider.complete(&messages, &route) {
+            Ok(ProviderResponse::Message(msg)) => {
+                if let Some(text) = msg.as_text() {
+                    plan::parse_classification_response(text)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Auto-create a minimal plan to break a planning deadlock instead
+    /// of failing. This opens the mutation gate so the model can proceed.
+    fn auto_create_plan(&mut self) {
+        if let Ok(mut plan) = self.plan.lock() {
+            plan.clear();
+            plan.add_item("Execute the requested changes".to_string());
+            plan.add_item("Verify the result".to_string());
+        }
+        self.planning_gate_active = false;
+        self.clear_planning_block_state();
     }
 
     fn note_planning_block(&mut self) -> Result<()> {
@@ -238,7 +274,8 @@ impl Agent {
 
         self.planning_block_count += 1;
         if self.planning_block_count >= MAX_PLANNING_BLOCKS_BEFORE_FAILURE {
-            return Err(Self::planning_deadlock_error());
+            // Instead of failing, auto-create a minimal plan to break the deadlock.
+            self.auto_create_plan();
         }
 
         Ok(())
@@ -248,6 +285,7 @@ impl Agent {
         self.planning_block_count = 0;
     }
 
+    #[allow(dead_code)]
     fn planning_still_blocked(&self) -> bool {
         self.planning_gate_active && !self.plan_exists() && self.planning_block_count > 0
     }
@@ -684,8 +722,7 @@ impl Agent {
 
         self.capture_run_baseline(&ctx.workspace_root);
 
-        self.planning_gate_active =
-            self.options.require_plan && should_require_research_plan_build(instruction);
+        self.planning_gate_active = self.options.require_plan && self.classify_task(instruction);
         self.planning_block_count = 0;
 
         self.execution_stage = ExecutionStage::Research;
@@ -714,7 +751,7 @@ impl Agent {
             }
         }
 
-        if self.options.require_plan && should_require_research_plan_build(instruction) {
+        if self.planning_gate_active {
             if let Ok(plan) = self.plan.lock() {
                 if plan.is_empty() {
                     system_prompt.push_str(
@@ -797,9 +834,6 @@ impl Agent {
                                 self.options.max_provider_retries,
                             ));
                             continue;
-                        }
-                        if self.planning_still_blocked() {
-                            return Err(Self::planning_deadlock_error());
                         }
                         self.session.add_message(msg);
                         let final_response = self.build_proof_of_work(&text, &ctx.workspace_root);

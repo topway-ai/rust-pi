@@ -105,37 +105,35 @@ impl Plan {
     }
 }
 
-fn has_explicit_sequence(lower: &str) -> bool {
-    // " then tell/show/report/say/list/print" are report requests, not real second steps
-    let has_then = (lower.contains(" and then ") || lower.contains(" then "))
-        && !is_then_followed_by_report(lower);
+/// Heuristic fast path for task classification.
+///
+/// Returns `Some(true)` if the task definitely requires planning,
+/// `Some(false)` if it definitely does not, or `None` if the answer is
+/// ambiguous and an LLM classification call should be used.
+pub fn heuristic_fast_path(instruction: &str) -> Option<bool> {
+    let lower = instruction.to_lowercase();
 
-    has_then
-        || lower.contains(" followed by ")
-        || lower.contains(" after that")
-        || lower.contains(" next,")
-        || lower.contains(" first,")
-        || lower.contains(" finally,")
-}
+    // ── Definite plan-required ──
+    if has_explicit_plan_request(&lower) {
+        return Some(true);
+    }
+    if has_broad_scope(&lower) {
+        return Some(true);
+    }
 
-fn is_then_followed_by_report(lower: &str) -> bool {
-    let report_verbs = [
-        " then tell ",
-        " then show ",
-        " then report ",
-        " then say ",
-        " then list ",
-        " then print ",
-        " then let me know",
-        " then confirm ",
-        " then output ",
-        " then run ",
-        " then verify ",
-        " then check ",
-        " then summarize ",
-        " then describe ",
-    ];
-    report_verbs.iter().any(|r| lower.contains(r))
+    // ── Definite no-plan ──
+    if is_trivial_query(&lower) {
+        return Some(false);
+    }
+
+    // Short instructions (≤ 120 chars) with no broad scope are almost
+    // never plan-worthy — single edits, quick fixes, simple reads.
+    if lower.len() <= 120 {
+        return Some(false);
+    }
+
+    // Ambiguous — defer to LLM classification.
+    None
 }
 
 fn has_explicit_plan_request(lower: &str) -> bool {
@@ -166,163 +164,67 @@ fn has_broad_scope(lower: &str) -> bool {
     broad_phrases.iter().any(|p| lower.contains(p))
 }
 
-fn has_multiple_action_categories(lower: &str) -> bool {
-    let refactor_words = ["refactor", "restructure", "reorganize"];
-    let review_words = ["review", "audit", "inspect"];
-    let create_words = ["implement", "add", "create", "build"];
-    let verify_words = ["verify", "test", "check"];
-    let fix_words = ["fix", "bug", "resolve"];
-    let modify_words = ["modify", "update", "change"];
-
-    let mut categories_found = 0;
-    if refactor_words.iter().any(|w| contains_unnegated(lower, w)) {
-        categories_found += 1;
-    }
-    if review_words.iter().any(|w| contains_unnegated(lower, w)) {
-        categories_found += 1;
-    }
-    if create_words.iter().any(|w| contains_unnegated(lower, w)) {
-        categories_found += 1;
-    }
-    if verify_words.iter().any(|w| contains_unnegated(lower, w)) {
-        categories_found += 1;
-    }
-    if fix_words.iter().any(|w| contains_unnegated(lower, w)) {
-        categories_found += 1;
-    }
-    if modify_words.iter().any(|w| contains_unnegated(lower, w)) {
-        categories_found += 1;
-    }
-
-    categories_found >= 2
-}
-
-/// Returns true if `word` appears in `text` without being preceded by
-/// "do not ", "don't ", or "not " within the same clause.
-fn contains_unnegated(text: &str, word: &str) -> bool {
-    let negation_prefixes = ["do not ", "don't ", "not "];
-    for (idx, _) in text.match_indices(word) {
-        let prefix_region = if idx >= 10 {
-            &text[idx - 10..idx]
-        } else {
-            &text[..idx]
-        };
-        if !negation_prefixes
-            .iter()
-            .any(|neg| prefix_region.ends_with(neg))
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn token_looks_like_file_reference(token: &str) -> bool {
-    let trimmed = token.trim_matches(|c: char| {
-        !(c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '\\' | '_' | '-'))
-    });
-
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    if trimmed.contains('/') || trimmed.contains('\\') {
-        return true;
-    }
-
-    let Some((base, ext)) = trimmed.rsplit_once('.') else {
-        return false;
-    };
-
-    !base.is_empty()
-        && !ext.is_empty()
-        && ext.len() <= 8
-        && ext.chars().all(|c| c.is_ascii_alphanumeric())
-}
-
-fn has_narrow_file_scope(instruction: &str, lower: &str) -> bool {
-    lower.contains("this file")
-        || lower.contains("that file")
-        || lower.contains("single file")
-        || lower.contains("one file")
-        || lower.contains("current file")
-        || lower.contains("the file")
-        || lower.contains("entry file")
-        || lower.contains("config file")
-        || lower.contains("main file")
-        || instruction
-            .split_whitespace()
-            .any(token_looks_like_file_reference)
-}
-
-fn has_small_mutation_request(lower: &str) -> bool {
-    let mutation_words = [
-        "fix ", "edit ", "update ", "change ", "modify ", "rename ", "write ", "patch ", "add ",
-        "remove ", "delete ", "insert ", "append ",
-    ];
-    mutation_words.iter().any(|w| lower.contains(*w))
-}
-
-fn has_self_declared_small_scope(lower: &str) -> bool {
-    let small_phrases = [
-        "tiny ",
-        "small ",
-        "one line",
-        "single line",
-        "one comment",
-        "a comment",
-        "single comment",
-        "exactly one",
-        "only one",
-        "one short",
-    ];
-    small_phrases.iter().any(|p| lower.contains(p))
-}
-
-fn is_small_scoped_mutation_task(instruction: &str, lower: &str) -> bool {
-    // Allow up to 300 chars — verbose constraints ("do not rewrite", "do not
-    // convert") make instructions longer without broadening scope.
-    lower.len() <= 300
-        && has_small_mutation_request(lower)
-        && (has_narrow_file_scope(instruction, lower) || has_self_declared_small_scope(lower))
-}
-
 fn is_trivial_query(lower: &str) -> bool {
     let query_starters = [
         "what is", "where is", "how do", "how does", "show me", "list ", "find ", "search ",
         "get ", "read ",
     ];
-    query_starters.iter().any(|q| lower.starts_with(q))
-        && lower.len() < 60
-        && !lower.contains(" and ")
-        && !lower.contains(" then ")
+    query_starters.iter().any(|q| lower.starts_with(q)) && lower.len() < 120
 }
 
+/// The system prompt used for the lightweight LLM classification call.
+pub const CLASSIFICATION_SYSTEM_PROMPT: &str = "\
+You are a task classifier for a coding agent. Given a user instruction, decide \
+whether it needs upfront planning before execution.
+
+Respond with ONLY the word \"direct\" or \"plan\". Nothing else.
+
+\"direct\" — the task can be executed immediately:
+  - Small edits to one or two files
+  - Adding/removing a comment, line, function, or small feature
+  - Fixing a typo or small bug
+  - Running a verification command
+  - Any task the user describes as tiny, small, or simple
+  - Tasks that ask for a report or diff after a small change
+
+\"plan\" — the task needs research and planning first:
+  - Broad refactors affecting many files
+  - Architectural changes
+  - Tasks spanning multiple unrelated subsystems
+  - Tasks where the user explicitly asks for a plan
+  - Large feature implementations with unclear scope";
+
+/// Build the messages for an LLM classification call.
+pub fn build_classification_messages(instruction: &str) -> (String, String) {
+    (
+        CLASSIFICATION_SYSTEM_PROMPT.to_string(),
+        instruction.to_string(),
+    )
+}
+
+/// Parse the LLM classification response. Returns `true` if planning
+/// is required. Defaults to `false` (direct execution) for ambiguous
+/// or unparseable responses — it is safer to attempt direct execution
+/// and let the model plan voluntarily than to block on a gate.
+pub fn parse_classification_response(response: &str) -> bool {
+    let trimmed = response.trim().to_lowercase();
+    // Accept "plan" anywhere in short responses to handle minor formatting.
+    trimmed == "plan" || (trimmed.len() < 20 && trimmed.contains("plan") && !trimmed.contains("no"))
+}
+
+/// Heuristic-only fallback used when no provider is available (tests, etc.)
+/// and for backward compatibility with `should_use_plan`.
 pub fn should_use_plan(instruction: &str) -> bool {
     should_require_research_plan_build(instruction)
 }
 
 pub fn should_require_research_plan_build(instruction: &str) -> bool {
-    let lower = &instruction.to_lowercase();
-    if has_explicit_plan_request(lower) {
-        return true;
+    match heuristic_fast_path(instruction) {
+        Some(result) => result,
+        // When called without an LLM, default to false — direct execution.
+        // The agent's classify_task method will use the LLM for this case.
+        None => false,
     }
-    if has_broad_scope(lower) {
-        return true;
-    }
-    if is_small_scoped_mutation_task(instruction, lower) {
-        return false;
-    }
-    if has_explicit_sequence(lower) {
-        return true;
-    }
-    if has_multiple_action_categories(lower) {
-        return true;
-    }
-    if is_trivial_query(lower) {
-        return false;
-    }
-    false
 }
 
 #[cfg(test)]
@@ -491,137 +393,149 @@ mod tests {
         assert!(plan.is_empty());
     }
 
+    // ── Heuristic fast-path tests ──
+
     #[test]
-    fn test_should_use_plan_multistep() {
-        assert!(should_use_plan("create a file and then update it"));
-        assert!(should_use_plan("first do X, then do Y"));
-        assert!(should_use_plan("build and then test the code"));
+    fn test_fast_path_explicit_plan_request() {
+        assert_eq!(
+            heuristic_fast_path("make a plan for the refactor"),
+            Some(true)
+        );
+        assert_eq!(
+            heuristic_fast_path("give me steps to implement this"),
+            Some(true)
+        );
+        assert_eq!(
+            heuristic_fast_path("break down this task into steps"),
+            Some(true)
+        );
     }
+
+    #[test]
+    fn test_fast_path_broad_scope() {
+        assert_eq!(heuristic_fast_path("refactor the entire repo"), Some(true));
+        assert_eq!(
+            heuristic_fast_path("fix bugs across the project"),
+            Some(true)
+        );
+        assert_eq!(
+            heuristic_fast_path("fix bugs across the codebase"),
+            Some(true)
+        );
+        assert_eq!(
+            heuristic_fast_path("refactor the whole project"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_fast_path_trivial_queries() {
+        assert_eq!(
+            heuristic_fast_path("what is the meaning of life"),
+            Some(false)
+        );
+        assert_eq!(heuristic_fast_path("show me the files"), Some(false));
+        assert_eq!(heuristic_fast_path("list all functions"), Some(false));
+        assert_eq!(heuristic_fast_path("read this file"), Some(false));
+    }
+
+    #[test]
+    fn test_fast_path_short_instructions_are_direct() {
+        // Short instructions (≤ 120 chars) without broad scope → direct
+        assert_eq!(heuristic_fast_path("fix the bug in main.rs"), Some(false));
+        assert_eq!(heuristic_fast_path("add a new function"), Some(false));
+        assert_eq!(
+            heuristic_fast_path("add a comment to this file"),
+            Some(false)
+        );
+        assert_eq!(
+            heuristic_fast_path("Fix the typo in main.rs, then show me the diff"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_fast_path_ambiguous_returns_none() {
+        // Longer instructions (> 120 chars) without broad scope keywords → ambiguous
+        assert_eq!(
+            heuristic_fast_path(
+                "Add exactly one short single-line comment to the main CLI entry file. Do not rewrite existing comments, do not convert comments to rustdoc, and do not change anything else."
+            ),
+            None
+        );
+    }
+
+    // ── LLM classification response parsing ──
+
+    #[test]
+    fn test_parse_classification_direct() {
+        assert!(!parse_classification_response("direct"));
+        assert!(!parse_classification_response("  direct  "));
+        assert!(!parse_classification_response("Direct"));
+        assert!(!parse_classification_response("DIRECT"));
+    }
+
+    #[test]
+    fn test_parse_classification_plan() {
+        assert!(parse_classification_response("plan"));
+        assert!(parse_classification_response("  plan  "));
+        assert!(parse_classification_response("Plan"));
+        assert!(parse_classification_response("PLAN"));
+    }
+
+    #[test]
+    fn test_parse_classification_ambiguous_defaults_to_direct() {
+        // Unparseable or unexpected responses default to direct execution.
+        assert!(!parse_classification_response("I think this needs a plan"));
+        assert!(!parse_classification_response("maybe"));
+        assert!(!parse_classification_response(""));
+        assert!(!parse_classification_response("no plan needed"));
+    }
+
+    #[test]
+    fn test_classification_prompt_is_well_formed() {
+        let (system, user) = build_classification_messages("fix the typo");
+        assert!(system.contains("direct"));
+        assert!(system.contains("plan"));
+        assert_eq!(user, "fix the typo");
+    }
+
+    // ── should_use_plan backward compatibility (heuristic-only fallback) ──
 
     #[test]
     fn test_should_use_plan_explicit_request() {
         assert!(should_use_plan("make a plan for the refactor"));
         assert!(should_use_plan("give me steps to implement this"));
-        assert!(should_use_plan("break down this task into steps"));
     }
 
     #[test]
     fn test_should_use_plan_broad_scope() {
         assert!(should_use_plan("refactor the entire repo"));
-        assert!(should_use_plan("fix bugs across the project"));
-        assert!(should_use_plan("refactor the entire repository"));
-    }
-
-    #[test]
-    fn test_should_use_plan_multiple_categories() {
-        assert!(should_use_plan(
-            "refactor the codebase and verify tests pass"
-        ));
-        assert!(should_use_plan("review and modify the code"));
-        assert!(should_use_plan("add tests and verify the build"));
-        assert!(should_use_plan("fix one bug and verify tests"));
-        assert!(should_use_plan("refactor and test the code"));
-    }
-
-    #[test]
-    fn test_should_skip_plan_simple_queries() {
-        assert!(!should_use_plan("what is the meaning of life"));
-        assert!(!should_use_plan("show me the files"));
-        assert!(!should_use_plan("list all functions"));
-    }
-
-    #[test]
-    fn test_should_skip_plan_trivial_tasks() {
-        assert!(!should_use_plan("read this file"));
-        assert!(!should_use_plan("find the error"));
-        assert!(!should_use_plan("check the status"));
-    }
-
-    #[test]
-    fn test_should_skip_plan_single_action() {
-        assert!(!should_use_plan("fix the bug in main.rs"));
-        assert!(!should_use_plan("add a new function"));
-        assert!(!should_use_plan("modify this file"));
-    }
-
-    #[test]
-    fn test_should_skip_plan_small_scoped_mutation_with_verification() {
-        assert!(!should_use_plan("fix the typo in README.md and run tests"));
-        assert!(!should_use_plan("edit this file and then run cargo fmt"));
-    }
-
-    #[test]
-    fn test_should_skip_plan_narrow_broad_words() {
-        assert!(!should_use_plan("show me the whole file"));
-        assert!(!should_use_plan("update the entire function"));
-        assert!(!should_use_plan("search across this file"));
-        assert!(!should_use_plan("read the entire class"));
-        assert!(!should_use_plan("find across all lines in file"));
-    }
-
-    #[test]
-    fn test_should_use_plan_genuine_broad_scope() {
-        assert!(should_use_plan("refactor the whole project"));
-        assert!(should_use_plan("refactor the entire repository"));
         assert!(should_use_plan("fix bugs across the codebase"));
     }
 
     #[test]
-    fn test_exact_failing_telegram_instruction_bypasses_planning() {
-        // Regression test: this exact real instruction was wrongly classified as
-        // plan-required, causing a planning deadlock in Telegram.
-        assert!(!should_use_plan(
-            "Add a short comment to the main CLI entry file explaining what it does, then tell me exactly which file changed."
-        ));
+    fn test_should_skip_plan_trivial() {
+        assert!(!should_use_plan("what is the meaning of life"));
+        assert!(!should_use_plan("show me the files"));
+        assert!(!should_use_plan("read this file"));
     }
 
     #[test]
-    fn test_small_edit_with_report_request_bypasses_planning() {
-        // "then tell/show me" is a report request, not a second mutation step
-        assert!(!should_use_plan(
-            "Fix the typo in main.rs, then show me the diff"
-        ));
-        assert!(!should_use_plan(
-            "Add a comment to config.rs then tell me what changed"
-        ));
-        assert!(!should_use_plan(
-            "Remove the unused import in lib.rs, then list the changes"
-        ));
-    }
-
-    #[test]
-    fn test_genuine_multistep_still_requires_plan() {
-        // Real multi-step tasks should still require planning
-        assert!(should_use_plan(
-            "create the migration file and then update the schema"
-        ));
-        assert!(should_use_plan(
-            "refactor the module and then update all callers"
-        ));
-    }
-
-    #[test]
-    fn test_add_recognized_as_small_mutation() {
-        assert!(!should_use_plan("add a comment to this file"));
+    fn test_should_skip_plan_short_instructions() {
+        assert!(!should_use_plan("fix the bug in main.rs"));
+        assert!(!should_use_plan("add a new function"));
+        assert!(!should_use_plan("modify this file"));
         assert!(!should_use_plan("add a docstring to main.rs"));
     }
 
-    #[test]
-    fn test_entry_file_recognized_as_narrow_scope() {
-        assert!(!should_use_plan(
-            "add a comment to the entry file explaining the purpose"
-        ));
-        assert!(!should_use_plan(
-            "update the main file with a version number"
-        ));
-    }
-
     // ── Regression tests for the three exact real Telegram failures ──
+    // These are now ambiguous (None) in the fast path, which means
+    // should_use_plan (heuristic fallback) returns false. The real agent
+    // classification uses the LLM and would also return false for these.
 
     #[test]
     fn test_real_failure_1_constrained_single_line_comment() {
-        // Exact instruction that failed in Telegram with "planning is required
-        // but no plan could be created; task is blocked".
         assert!(!should_use_plan(
             "Add exactly one short single-line comment to the main CLI entry file explaining what it does. Do not rewrite existing comments, do not convert comments to rustdoc, and do not change anything else. Then tell me exactly which line changed."
         ));
@@ -629,7 +543,6 @@ mod tests {
 
     #[test]
     fn test_real_failure_2_tiny_change_with_verification() {
-        // Exact instruction that failed: tiny edit + lightweight verification.
         assert!(!should_use_plan(
             "Make a tiny safe change, then run an appropriate lightweight verification command and tell me both the changed file and the verification result."
         ));
@@ -637,42 +550,8 @@ mod tests {
 
     #[test]
     fn test_real_failure_3_small_multi_step_mutation() {
-        // Exact instruction that failed: small but genuinely multi-step.
-        // This bypasses planning because the user self-declared it as "small".
         assert!(!should_use_plan(
             "Add a small new CLI subcommand status that prints the effective workspace, provider, and model. Update the Telegram /start message so it mentions the new status command where appropriate. Then verify the change and summarize the diff."
         ));
-    }
-
-    #[test]
-    fn test_negated_action_words_not_counted() {
-        // "do not change" should not trigger the modify category
-        assert!(!should_use_plan(
-            "Add a comment to the entry file. Do not change anything else."
-        ));
-        // But unnegated multi-category still works
-        assert!(should_use_plan(
-            "implement the feature and verify it works across the codebase"
-        ));
-    }
-
-    #[test]
-    fn test_self_declared_small_scope_bypasses_planning() {
-        assert!(!should_use_plan(
-            "Make a tiny change and then run cargo check"
-        ));
-        assert!(!should_use_plan("Add exactly one line to the config"));
-        assert!(!should_use_plan("Make a small fix and verify it compiles"));
-    }
-
-    #[test]
-    fn test_verification_in_then_clause_not_treated_as_sequence() {
-        assert!(!should_use_plan(
-            "Fix the typo in main.rs, then run cargo test"
-        ));
-        assert!(!should_use_plan(
-            "Add a comment to this file, then verify it compiles"
-        ));
-        assert!(!should_use_plan("Edit README.md then summarize the diff"));
     }
 }

@@ -189,9 +189,11 @@ fn test_should_use_plan_policy_simple() {
 
 #[test]
 fn test_should_use_plan_policy_complex() {
-    assert!(should_use_plan("create file and then update it"));
-    assert!(should_use_plan("implement feature X and verify it works"));
-    assert!(should_use_plan("build and test the project"));
+    // Short multi-step instructions are now classified by the LLM (ambiguous
+    // to heuristics). The heuristic fallback defaults to false. Only broad
+    // scope and explicit plan requests are definitively plan-required.
+    assert!(should_use_plan("make a plan to refactor the codebase"));
+    assert!(should_use_plan("refactor the entire repository"));
 }
 
 #[test]
