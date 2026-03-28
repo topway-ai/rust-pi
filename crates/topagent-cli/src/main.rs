@@ -657,6 +657,7 @@ impl ChatSessionManager {
         let instruction = text.to_string();
 
         thread::spawn(move || {
+            let has_progress = worker_progress_callback.is_some();
             if let Some(callback) = &worker_progress_callback {
                 agent.set_progress_callback(Some(callback.clone()));
             }
@@ -680,7 +681,11 @@ impl ChatSessionManager {
                 }
                 Err(topagent_core::Error::Stopped(_)) => {}
                 Err(e) => {
-                    send_telegram_chunks(&adapter, chat_id, vec![format!("Error: {}", e)]);
+                    // When progress is active, the status message already shows the
+                    // failure via ProgressUpdate::failed. Don't send a duplicate error.
+                    if !has_progress {
+                        send_telegram_chunks(&adapter, chat_id, vec![format!("Error: {}", e)]);
+                    }
                 }
             }
 

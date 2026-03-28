@@ -106,13 +106,31 @@ impl Plan {
 }
 
 fn has_explicit_sequence(lower: &str) -> bool {
-    lower.contains(" and then ")
-        || lower.contains(" then ")
+    // " then tell/show/report/say/list/print" are report requests, not real second steps
+    let has_then = (lower.contains(" and then ") || lower.contains(" then "))
+        && !is_then_followed_by_report(lower);
+
+    has_then
         || lower.contains(" followed by ")
         || lower.contains(" after that")
         || lower.contains(" next,")
         || lower.contains(" first,")
         || lower.contains(" finally,")
+}
+
+fn is_then_followed_by_report(lower: &str) -> bool {
+    let report_verbs = [
+        " then tell ",
+        " then show ",
+        " then report ",
+        " then say ",
+        " then list ",
+        " then print ",
+        " then let me know",
+        " then confirm ",
+        " then output ",
+    ];
+    report_verbs.iter().any(|r| lower.contains(r))
 }
 
 fn has_explicit_plan_request(lower: &str) -> bool {
@@ -203,6 +221,10 @@ fn has_narrow_file_scope(instruction: &str, lower: &str) -> bool {
         || lower.contains("single file")
         || lower.contains("one file")
         || lower.contains("current file")
+        || lower.contains("the file")
+        || lower.contains("entry file")
+        || lower.contains("config file")
+        || lower.contains("main file")
         || instruction
             .split_whitespace()
             .any(token_looks_like_file_reference)
@@ -210,7 +232,8 @@ fn has_narrow_file_scope(instruction: &str, lower: &str) -> bool {
 
 fn has_small_mutation_request(lower: &str) -> bool {
     let mutation_words = [
-        "fix ", "edit ", "update ", "change ", "modify ", "rename ", "write ", "patch ",
+        "fix ", "edit ", "update ", "change ", "modify ", "rename ", "write ", "patch ", "add ",
+        "remove ", "delete ", "insert ", "append ",
     ];
     mutation_words.iter().any(|w| lower.contains(*w))
 }
@@ -498,5 +521,55 @@ mod tests {
         assert!(should_use_plan("refactor the whole project"));
         assert!(should_use_plan("refactor the entire repository"));
         assert!(should_use_plan("fix bugs across the codebase"));
+    }
+
+    #[test]
+    fn test_exact_failing_telegram_instruction_bypasses_planning() {
+        // Regression test: this exact real instruction was wrongly classified as
+        // plan-required, causing a planning deadlock in Telegram.
+        assert!(!should_use_plan(
+            "Add a short comment to the main CLI entry file explaining what it does, then tell me exactly which file changed."
+        ));
+    }
+
+    #[test]
+    fn test_small_edit_with_report_request_bypasses_planning() {
+        // "then tell/show me" is a report request, not a second mutation step
+        assert!(!should_use_plan(
+            "Fix the typo in main.rs, then show me the diff"
+        ));
+        assert!(!should_use_plan(
+            "Add a comment to config.rs then tell me what changed"
+        ));
+        assert!(!should_use_plan(
+            "Remove the unused import in lib.rs, then list the changes"
+        ));
+    }
+
+    #[test]
+    fn test_genuine_multistep_still_requires_plan() {
+        // Real multi-step tasks should still require planning
+        assert!(should_use_plan(
+            "create the migration file and then update the schema"
+        ));
+        assert!(should_use_plan(
+            "refactor the module and then update all callers"
+        ));
+    }
+
+    #[test]
+    fn test_add_recognized_as_small_mutation() {
+        assert!(!should_use_plan("add a comment to this file"));
+        assert!(!should_use_plan("add a docstring to main.rs"));
+    }
+
+    #[test]
+    fn test_entry_file_recognized_as_narrow_scope() {
+        assert!(!should_use_plan(
+            "add a comment to the entry file explaining the purpose"
+        ));
+        assert!(!should_use_plan(
+            "update the main file with a version number"
+        ));
     }
 }
