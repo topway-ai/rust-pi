@@ -1,11 +1,67 @@
 use crate::context::ToolContext;
+use crate::secrets;
 use crate::tool_spec::ToolSpec;
 use crate::{Error, Result};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread;
 use std::time::Duration;
+use tracing::warn;
+
+/// Cached bwrap availability: 0 = unknown, 1 = available, 2 = unavailable.
+static BWRAP_STATE: AtomicU8 = AtomicU8::new(0);
+
+/// Paths the sandbox allows read-only access to.
+static BWRAP_RO_BINDS: Lazy<Vec<&str>> = Lazy::new(|| {
+    vec![
+        "/usr",
+        "/bin",
+        "/lib",
+        "/lib64",
+        "/etc",
+        "/nix",                // NixOS
+        "/run/current-system", // NixOS
+    ]
+});
+
+/// Check whether bwrap is installed and functional (user namespaces enabled).
+fn bwrap_available() -> bool {
+    let state = BWRAP_STATE.load(Ordering::Relaxed);
+    if state == 1 {
+        return true;
+    }
+    if state == 2 {
+        return false;
+    }
+    // Probe: run a trivial bwrap command.
+    let ok = Command::new("bwrap")
+        .args([
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "true",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    BWRAP_STATE.store(if ok { 1 } else { 2 }, Ordering::Relaxed);
+    if !ok {
+        warn!(
+            "bwrap unavailable (not installed or user namespaces restricted); \
+             bash commands will run without filesystem sandboxing"
+        );
+    }
+    ok
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BashArgs {
@@ -39,12 +95,52 @@ impl crate::tools::Tool for BashTool {
             return Err(Error::Stopped("user requested stop".into()));
         }
 
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(&args.command)
-            .current_dir(&ctx.exec.workspace_root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+        // Block commands that attempt to access secrets.
+        if let Some(block_msg) = secrets::check_bash_secret_access(&args.command) {
+            return Ok(block_msg);
+        }
+
+        let workspace = ctx.exec.workspace_root.to_string_lossy();
+        let use_bwrap = bwrap_available();
+
+        let mut cmd = if use_bwrap {
+            let mut c = Command::new("bwrap");
+            // Read-only bind standard system paths.
+            for path in BWRAP_RO_BINDS.iter() {
+                if std::path::Path::new(path).exists() {
+                    c.args(["--ro-bind", path, path]);
+                }
+            }
+            // Writable workspace.
+            c.args(["--bind", &workspace, &workspace]);
+            // Writable /tmp.
+            c.args(["--tmpfs", "/tmp"]);
+            // Minimal /dev and /proc.
+            c.args(["--dev", "/dev"]);
+            c.args(["--proc", "/proc"]);
+            // Block network access.
+            c.arg("--unshare-net");
+            // Set working directory inside sandbox.
+            c.args(["--chdir", &workspace]);
+            // The command to run inside the sandbox.
+            c.args(["sh", "-c", &args.command]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.arg("-c")
+                .arg(&args.command)
+                .current_dir(&ctx.exec.workspace_root);
+            c
+        };
+
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        // Strip secret-bearing environment variables from child processes.
+        for var_name in secrets::SECRET_ENV_VARS {
+            cmd.env_remove(var_name);
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| Error::ToolFailed(format!("failed to execute command: {}", e)))?;
 

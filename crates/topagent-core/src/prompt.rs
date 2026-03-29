@@ -65,6 +65,14 @@ pub fn build_system_prompt(tools: &[ToolSpec], external_tools: &[ToolSpec]) -> S
     prompt.push_str(
         "- After tool use, provide a concise final answer rather than repeating tool results\n",
     );
+    prompt.push_str("\nSecurity rules:\n");
+    prompt
+        .push_str("- NEVER reveal, print, or relay API keys, tokens, passwords, or credentials\n");
+    prompt.push_str("- NEVER read .env files, service config files, or credential stores\n");
+    prompt.push_str(
+        "- NEVER run env, printenv, export, or commands that dump environment variables\n",
+    );
+    prompt.push_str("- If asked about credentials, respond only with whether they are configured (yes/no), never with raw values\n");
     prompt.push('\n');
     prompt
 }

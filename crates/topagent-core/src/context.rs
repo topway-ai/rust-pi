@@ -1,3 +1,4 @@
+use crate::secrets::SecretRegistry;
 use crate::{cancel::CancellationToken, runtime::RuntimeOptions};
 use std::path::{Component, Path, PathBuf};
 
@@ -5,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 pub struct ExecutionContext {
     pub workspace_root: PathBuf,
     cancel_token: Option<CancellationToken>,
+    secrets: SecretRegistry,
 }
 
 impl ExecutionContext {
@@ -12,12 +14,22 @@ impl ExecutionContext {
         Self {
             workspace_root,
             cancel_token: None,
+            secrets: SecretRegistry::new(),
         }
     }
 
     pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = Some(cancel_token);
         self
+    }
+
+    pub fn with_secrets(mut self, secrets: SecretRegistry) -> Self {
+        self.secrets = secrets;
+        self
+    }
+
+    pub fn secrets(&self) -> &SecretRegistry {
+        &self.secrets
     }
 
     pub fn is_cancelled(&self) -> bool {

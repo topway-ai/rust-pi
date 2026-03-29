@@ -1571,7 +1571,11 @@ fn run_telegram(
     )?;
     let token = config.token;
     let workspace = config.workspace;
-    let ctx = ExecutionContext::new(workspace);
+    // Register known secrets for redaction in tool output and final replies.
+    let mut secrets = topagent_core::SecretRegistry::new();
+    secrets.register(&config.api_key);
+    secrets.register(&token);
+    let ctx = ExecutionContext::new(workspace).with_secrets(secrets.clone());
     let workspace_label = ctx.workspace_root.display().to_string();
     let options = config.options;
     let api_key = config.api_key;
@@ -1614,8 +1618,13 @@ fn run_telegram(
 
     let provider_label = route.provider_id.clone();
     let model_label = route.model_id.clone();
-    let mut session_manager =
-        ChatSessionManager::new(route, api_key, options, ctx.workspace_root.clone());
+    let mut session_manager = ChatSessionManager::new(
+        route,
+        api_key,
+        options,
+        ctx.workspace_root.clone(),
+        secrets.clone(),
+    );
     let mut offset = 0i64;
     let mut polling_retries = 0usize;
 
@@ -1699,7 +1708,7 @@ fn run_telegram(
                         } else {
                             "No task is currently running.".to_string()
                         };
-                        send_telegram_chunks(&adapter, chat_id, vec![reply]);
+                        send_telegram_chunks(&adapter, chat_id, vec![reply], None);
                         continue;
                     }
 
@@ -1711,12 +1720,12 @@ fn run_telegram(
                             session_manager.reset_chat(chat_id);
                             "Conversation history cleared.".to_string()
                         };
-                        send_telegram_chunks(&adapter, chat_id, vec![reply]);
+                        send_telegram_chunks(&adapter, chat_id, vec![reply], None);
                         continue;
                     }
 
                     let response = session_manager.start_message(&ctx, &adapter, chat_id, text);
-                    send_telegram_chunks(&adapter, chat_id, response);
+                    send_telegram_chunks(&adapter, chat_id, response, Some(&secrets));
                     let _ = adapter.acknowledge(chat_id, message_id);
                 }
             }
@@ -1741,12 +1750,19 @@ fn run_telegram(
     }
 }
 
-fn send_telegram_chunks(adapter: &TelegramAdapter, chat_id: i64, chunks: Vec<String>) {
+fn send_telegram_chunks(
+    adapter: &TelegramAdapter,
+    chat_id: i64,
+    chunks: Vec<String>,
+    secrets: Option<&topagent_core::SecretRegistry>,
+) {
     for chunk in chunks {
-        let outgoing = OutgoingMessage {
-            chat_id,
-            text: chunk,
+        // Last-mile secret redaction before the message reaches Telegram.
+        let text = match secrets {
+            Some(reg) => reg.redact(&chunk),
+            None => chunk,
         };
+        let outgoing = OutgoingMessage { chat_id, text };
         if let Err(e) = adapter.send_message(outgoing) {
             error!("failed to send message: {}", e);
         }
@@ -1792,6 +1808,7 @@ struct ChatSessionManager {
     api_key: String,
     options: RuntimeOptions,
     history_store: ChatHistoryStore,
+    secrets: topagent_core::SecretRegistry,
     sessions: HashMap<i64, SessionState>,
     completed_tx: mpsc::Sender<CompletedChatTask>,
     completed_rx: mpsc::Receiver<CompletedChatTask>,
@@ -1818,6 +1835,7 @@ impl ChatSessionManager {
         api_key: String,
         options: RuntimeOptions,
         workspace_root: PathBuf,
+        secrets: topagent_core::SecretRegistry,
     ) -> Self {
         let (completed_tx, completed_rx) = mpsc::channel();
         Self {
@@ -1825,6 +1843,7 @@ impl ChatSessionManager {
             api_key,
             options,
             history_store: ChatHistoryStore::new(workspace_root),
+            secrets,
             sessions: HashMap::new(),
             completed_tx,
             completed_rx,
@@ -1848,6 +1867,10 @@ impl ChatSessionManager {
         match self.history_store.load(chat_id) {
             Ok(messages) if !messages.is_empty() => {
                 let restored_count = messages.len();
+                let messages: Vec<_> = messages
+                    .into_iter()
+                    .map(|m| m.redact_secrets(&self.secrets))
+                    .collect();
                 agent.restore_conversation_messages(messages);
                 info!(
                     "restored {} Telegram history messages for chat {} from {}",
@@ -1985,6 +2008,7 @@ impl ChatSessionManager {
         let worker_progress_callback = progress_callback.clone();
         let completed_tx = self.completed_tx.clone();
         let history_store = self.history_store.clone();
+        let worker_secrets = self.secrets.clone();
         let adapter = adapter.clone();
         let instruction = text.to_string();
 
@@ -2010,14 +2034,19 @@ impl ChatSessionManager {
                     } else {
                         topagent_core::channel::telegram::chunk_text(&response, max_len)
                     };
-                    send_telegram_chunks(&adapter, chat_id, chunks);
+                    send_telegram_chunks(&adapter, chat_id, chunks, Some(&worker_secrets));
                 }
                 Err(topagent_core::Error::Stopped(_)) => {}
                 Err(e) => {
                     // When progress is active, the status message already shows the
                     // failure via ProgressUpdate::failed. Don't send a duplicate error.
                     if !has_progress {
-                        send_telegram_chunks(&adapter, chat_id, vec![format!("Error: {}", e)]);
+                        send_telegram_chunks(
+                            &adapter,
+                            chat_id,
+                            vec![format!("Error: {}", e)],
+                            Some(&worker_secrets),
+                        );
                     }
                 }
             }
@@ -2056,6 +2085,7 @@ mod tests {
             "test-key".to_string(),
             RuntimeOptions::default(),
             workspace_root,
+            topagent_core::SecretRegistry::new(),
         )
     }
 

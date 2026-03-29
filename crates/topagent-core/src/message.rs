@@ -90,4 +90,25 @@ impl Message {
             None
         }
     }
+
+    /// Return a copy of this message with all secret values redacted from
+    /// text content and tool results. Used to sanitize persisted history
+    /// before injecting it back into a model session.
+    pub fn redact_secrets(&self, registry: &crate::secrets::SecretRegistry) -> Self {
+        let redacted_content = match &self.content {
+            Content::Text { text } => Content::Text {
+                text: registry.redact(text),
+            },
+            Content::ToolResult { id, result } => Content::ToolResult {
+                id: id.clone(),
+                result: registry.redact(result),
+            },
+            // ToolRequest args are model-generated, not secret-bearing.
+            other => other.clone(),
+        };
+        Self {
+            role: self.role,
+            content: redacted_content,
+        }
+    }
 }

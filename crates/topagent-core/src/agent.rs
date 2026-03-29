@@ -1189,6 +1189,7 @@ impl Agent {
                                     continue;
                                 }
                             };
+                            let result_str = ctx.secrets().redact(&result_str);
                             self.session
                                 .add_message(Message::tool_result(id, result_str));
                             empty_response_retries = 0;
@@ -1335,6 +1336,10 @@ impl Agent {
                             self.clear_planning_block_state();
                         }
                     }
+
+                    // Redact secrets from tool output before it enters the
+                    // model context — defense-in-depth against exfiltration.
+                    let result = ctx.secrets().redact(&result);
 
                     self.session
                         .add_message(Message::tool_request(id.clone(), name, args));

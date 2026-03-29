@@ -17,6 +17,7 @@ pub mod prompt;
 pub mod provider;
 pub mod provider_factory;
 pub mod runtime;
+pub mod secrets;
 pub mod session;
 pub mod task_result;
 pub mod tool_genesis;
@@ -42,6 +43,7 @@ pub use project::{
 pub use provider::{Provider, ProviderResponse, ScriptedProvider, ToolCallEntry};
 pub use provider_factory::create_provider;
 pub use runtime::RuntimeOptions;
+pub use secrets::SecretRegistry;
 pub use session::Session;
 pub use task_result::{TaskEvidence, TaskResult, VerificationCommand};
 pub use tool_spec::ToolSpec;
