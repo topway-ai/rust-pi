@@ -160,6 +160,7 @@ fn test_readme_documents_uninstall() {
     let readme = std::fs::read_to_string(repo_root.join("README.md")).unwrap();
 
     assert!(readme.contains("topagent uninstall"));
+    assert!(readme.contains("removes the installed `topagent` binary"));
 }
 
 #[test]

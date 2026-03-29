@@ -377,10 +377,12 @@ fn test_uninstall_stops_service_removes_managed_files_and_preserves_workspace() 
     assert!(stdout.contains("Disabled: yes"));
     assert!(stdout.contains("unit file"));
     assert!(stdout.contains("env file"));
+    assert!(stdout.contains("installed binary"));
     assert!(stdout.contains("workspace directory preserved"));
 
     assert!(!harness.unit_path().exists());
     assert!(!harness.env_path().exists());
+    assert!(!harness.binary_path.exists());
     assert!(harness.workspace_path().exists());
 
     let calls = harness.calls_log();

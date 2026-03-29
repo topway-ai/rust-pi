@@ -109,7 +109,7 @@ enum Commands {
         #[command(subcommand)]
         command: ServiceCommands,
     },
-    /// Stop and remove the TopAgent Telegram background service and config.
+    /// Stop and remove the TopAgent Telegram background service and config, and remove the installed binary when run from that installed location.
     Uninstall,
     #[command(hide = true)]
     Run { instruction: String },
@@ -228,6 +228,12 @@ struct ServiceStatusSnapshot {
 enum InstallRootKind {
     SourceCheckout,
     InstalledBinary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BinaryCleanupOutcome {
+    Removed(String),
+    Preserved(String),
 }
 
 #[derive(Debug, Clone)]
@@ -388,7 +394,7 @@ fn run_status() -> Result<()> {
 }
 
 fn run_uninstall() -> Result<()> {
-    uninstall_service_setup()
+    uninstall_service_setup(true)
 }
 
 fn build_runtime_options(
@@ -826,7 +832,7 @@ fn run_service_restart() -> Result<()> {
 }
 
 fn run_service_uninstall() -> Result<()> {
-    uninstall_service_setup()
+    uninstall_service_setup(false)
 }
 
 fn run_service_lifecycle(
@@ -980,7 +986,7 @@ fn render_status() -> Result<()> {
     Ok(())
 }
 
-fn uninstall_service_setup() -> Result<()> {
+fn uninstall_service_setup(remove_binary: bool) -> Result<()> {
     let paths = service_paths()?;
     let env_values = read_managed_env_metadata(&paths.env_path).unwrap_or_default();
     let managed_unit = paths.unit_path.exists() && is_topagent_managed_file(&paths.unit_path)?;
@@ -1055,6 +1061,13 @@ fn uninstall_service_setup() -> Result<()> {
         preserved.push(format!("workspace directory preserved: {}", workspace));
     }
 
+    if remove_binary {
+        match cleanup_current_binary_for_uninstall() {
+            BinaryCleanupOutcome::Removed(item) => removed.push(item),
+            BinaryCleanupOutcome::Preserved(item) => preserved.push(item),
+        }
+    }
+
     let mut daemon_reload = String::from("not needed");
     if should_manage_service && systemd_available.is_ok() {
         daemon_reload = run_systemctl_user(&["daemon-reload"])
@@ -1090,6 +1103,62 @@ fn uninstall_service_setup() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn cleanup_current_binary_for_uninstall() -> BinaryCleanupOutcome {
+    let current_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            return BinaryCleanupOutcome::Preserved(format!(
+                "installed binary left in place (could not determine current binary path: {})",
+                err
+            ))
+        }
+    };
+
+    cleanup_binary_for_uninstall_at_path(&current_exe)
+}
+
+fn cleanup_binary_for_uninstall_at_path(exe: &Path) -> BinaryCleanupOutcome {
+    let resolved_exe = match exe.canonicalize() {
+        Ok(path) => path,
+        Err(err) => {
+            return BinaryCleanupOutcome::Preserved(format!(
+                "installed binary left in place (could not resolve {}: {})",
+                exe.display(),
+                err
+            ))
+        }
+    };
+
+    match detect_install_root_from_exe(&resolved_exe) {
+        Ok(InstallRoot {
+            kind: InstallRootKind::SourceCheckout,
+            ..
+        }) => BinaryCleanupOutcome::Preserved(format!(
+            "source checkout binary preserved: {}",
+            resolved_exe.display()
+        )),
+        Ok(InstallRoot {
+            kind: InstallRootKind::InstalledBinary,
+            ..
+        }) => match std::fs::remove_file(&resolved_exe) {
+            Ok(()) => BinaryCleanupOutcome::Removed(format!(
+                "installed binary {}",
+                resolved_exe.display()
+            )),
+            Err(err) => BinaryCleanupOutcome::Preserved(format!(
+                "installed binary left in place (failed to remove {}: {})",
+                resolved_exe.display(),
+                err
+            )),
+        },
+        Err(err) => BinaryCleanupOutcome::Preserved(format!(
+            "installed binary left in place (could not classify {}: {})",
+            resolved_exe.display(),
+            err
+        )),
+    }
 }
 
 fn render_service_unit_file(
@@ -1967,7 +2036,8 @@ impl ChatSessionManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_install_root_from_exe, resolve_workspace_path_with_current_dir, ChatSessionManager,
+        cleanup_binary_for_uninstall_at_path, detect_install_root_from_exe,
+        resolve_workspace_path_with_current_dir, BinaryCleanupOutcome, ChatSessionManager,
         InstallRootKind, RunningChatTask, SessionState,
     };
     use std::path::PathBuf;
@@ -2088,6 +2158,60 @@ mod tests {
         let err = detect_install_root_from_exe(&exe).unwrap_err().to_string();
 
         assert!(err.contains("does not look like a TopAgent source checkout"));
+    }
+
+    #[test]
+    fn test_cleanup_binary_for_uninstall_removes_installed_binary() {
+        let install_dir = TempDir::new().unwrap();
+        let exe = install_dir.path().join("topagent");
+        std::fs::write(&exe, "").unwrap();
+        let canonical_exe = exe.canonicalize().unwrap();
+
+        let outcome = cleanup_binary_for_uninstall_at_path(&exe);
+
+        assert_eq!(
+            outcome,
+            BinaryCleanupOutcome::Removed(format!("installed binary {}", canonical_exe.display()))
+        );
+        assert!(!exe.exists());
+    }
+
+    #[test]
+    fn test_cleanup_binary_for_uninstall_preserves_source_checkout_binary() {
+        let repo = TempDir::new().unwrap();
+        std::fs::create_dir_all(repo.path().join("crates").join("topagent-cli")).unwrap();
+        std::fs::create_dir_all(repo.path().join("crates").join("topagent-core")).unwrap();
+        std::fs::create_dir_all(repo.path().join("target").join("debug")).unwrap();
+        std::fs::write(repo.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(
+            repo.path()
+                .join("crates")
+                .join("topagent-cli")
+                .join("Cargo.toml"),
+            "[package]\nname = \"topagent-cli\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path()
+                .join("crates")
+                .join("topagent-core")
+                .join("Cargo.toml"),
+            "[package]\nname = \"topagent-core\"\n",
+        )
+        .unwrap();
+        let exe = repo.path().join("target").join("debug").join("topagent");
+        std::fs::write(&exe, "").unwrap();
+
+        let outcome = cleanup_binary_for_uninstall_at_path(&exe);
+
+        assert_eq!(
+            outcome,
+            BinaryCleanupOutcome::Preserved(format!(
+                "source checkout binary preserved: {}",
+                exe.canonicalize().unwrap().display()
+            ))
+        );
+        assert!(exe.exists());
     }
 
     #[test]

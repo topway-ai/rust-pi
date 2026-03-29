@@ -66,6 +66,7 @@ Service notes:
 - `topagent service restart` reloads the installed bot process without changing config.
 - Chat history survives service restarts because it is stored in the configured workspace.
 - `/reset` clears the persisted history for the current Telegram chat.
+- `topagent uninstall` removes the managed service/config and also removes the installed `topagent` binary when you run it from that installed location. If you run it from a source checkout, the checkout binary is preserved.
 
 If this fails:
 
