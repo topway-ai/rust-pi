@@ -19,13 +19,25 @@ impl Session {
         self.messages.push(message);
     }
 
+    /// Returns all messages including the system prompt.
+    /// Allocates a new Vec — use `messages_for_provider()` in hot paths.
     pub fn messages(&self) -> Vec<Message> {
-        let mut msgs = Vec::new();
+        let mut msgs = Vec::with_capacity(self.messages.len() + 1);
         if let Some(ref sys) = self.system_prompt {
             msgs.push(Message::system(sys));
         }
-        msgs.extend(self.messages.clone());
+        msgs.extend(self.messages.iter().cloned());
         msgs
+    }
+
+    /// Build the full message list into `buf` (system prompt + conversation),
+    /// reusing the buffer's allocation across calls.
+    pub fn fill_messages(&self, buf: &mut Vec<Message>) {
+        buf.clear();
+        if let Some(ref sys) = self.system_prompt {
+            buf.push(Message::system(sys));
+        }
+        buf.extend(self.messages.iter().cloned());
     }
 
     pub fn raw_messages(&self) -> Vec<Message> {

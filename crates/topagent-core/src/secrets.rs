@@ -74,9 +74,10 @@ impl SecretRegistry {
     }
 
     /// Redact all registered secrets and pattern-matched secrets from text.
-    pub fn redact(&self, text: &str) -> String {
+    /// Returns `Cow::Borrowed` when no redaction was needed (zero-alloc fast path).
+    pub fn redact<'a>(&self, text: &'a str) -> Cow<'a, str> {
         if text.is_empty() {
-            return String::new();
+            return Cow::Borrowed(text);
         }
 
         let mut result = Cow::Borrowed(text);
@@ -104,7 +105,7 @@ impl SecretRegistry {
             Cow::Borrowed(_) => {}
         }
 
-        result.into_owned()
+        result
     }
 }
 

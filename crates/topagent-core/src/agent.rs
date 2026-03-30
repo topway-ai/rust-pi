@@ -99,6 +99,12 @@ pub enum BashCommandClass {
     Verification,
 }
 
+/// Result of a preflight check that blocked tool execution.
+struct PreflightBlock {
+    message: String,
+    is_planning_block: bool,
+}
+
 impl Agent {
     pub fn new(provider: Box<dyn Provider>, tools: Vec<Box<dyn Tool>>) -> Self {
         Self::with_options(provider, tools, RuntimeOptions::default())
@@ -444,6 +450,60 @@ impl Agent {
         Ok(())
     }
 
+    /// Record a tool call that produced `result` without successful execution
+    /// (unknown tool, blocked by hook/gate, execution error).
+    fn record_tool_result(
+        &mut self,
+        id: String,
+        name: String,
+        args: serde_json::Value,
+        result: String,
+    ) {
+        self.session
+            .add_message(Message::tool_request(id.clone(), name, args));
+        self.session.add_message(Message::tool_result(id, result));
+    }
+
+    /// Shared preflight checks: pre-hooks, planning gate, pre-execution gate.
+    /// Returns `None` if all pass, `Some(PreflightBlock)` if blocked.
+    fn run_preflight(
+        &mut self,
+        ctx: &ExecutionContext,
+        name: &str,
+        args: &serde_json::Value,
+        bash_args: Option<&serde_json::Value>,
+        external_effect: Option<ExternalToolEffect>,
+    ) -> Option<PreflightBlock> {
+        let tool_ctx = ToolContext::new(ctx, &self.options);
+        if let Some(hooks) = self.hooks.get(name) {
+            if !hooks.run_pre_hooks(name, args, &tool_ctx) {
+                return Some(PreflightBlock {
+                    message: "error: tool blocked by pre-hook".into(),
+                    is_planning_block: false,
+                });
+            }
+        }
+
+        if let Some(block_msg) = self.check_planning_gate(name, bash_args, external_effect) {
+            self.emit_progress(Self::blocked_progress(&block_msg));
+            return Some(PreflightBlock {
+                message: block_msg,
+                is_planning_block: true,
+            });
+        }
+        if let Some(block_msg) =
+            self.check_pre_execution_verification_gate(name, bash_args, external_effect)
+        {
+            self.emit_progress(Self::blocked_progress(&block_msg));
+            return Some(PreflightBlock {
+                message: block_msg,
+                is_planning_block: false,
+            });
+        }
+
+        None
+    }
+
     /// Execute a single tool call (internal or external), updating session,
     /// planning gates, execution stage, and changed-file tracking.
     ///
@@ -461,72 +521,33 @@ impl Agent {
         let is_external = self.external_tools.get(&name).is_some();
 
         // ── Resolve tool (internal, external, or unknown) ──
-        let tool = match self.tools.get(&name) {
-            Some(t) => t,
-            None if is_external => {
+        if self.tools.get(&name).is_none() {
+            if is_external {
                 return self.execute_external_tool_call(ctx, instruction, id, name, args);
             }
-            None => {
-                self.session.add_message(Message::tool_request(
-                    id.clone(),
-                    name.clone(),
-                    args.clone(),
-                ));
-                self.session.add_message(Message::tool_result(
-                    id,
-                    format!("error: unknown tool '{}'", name),
-                ));
-                return Ok(());
-            }
-        };
-
-        let tool_ctx = ToolContext::new(ctx, &self.options);
-
-        // ── Pre-hooks ──
-        if let Some(hooks) = self.hooks.get(&name) {
-            if !hooks.run_pre_hooks(&name, &args, &tool_ctx) {
-                self.session.add_message(Message::tool_request(
-                    id.clone(),
-                    name.clone(),
-                    args.clone(),
-                ));
-                self.session.add_message(Message::tool_result(
-                    id,
-                    format!("error: tool '{}' blocked by pre-hook", name),
-                ));
-                return Ok(());
-            }
+            self.record_tool_result(
+                id,
+                name.clone(),
+                args,
+                format!("error: unknown tool '{}'", name),
+            );
+            return Ok(());
         }
 
-        // ── Planning / pre-execution gates ──
+        // ── Preflight: hooks + gates ──
         let bash_args = if name == "bash" { Some(&args) } else { None };
-        if let Some(block_msg) = self.check_planning_gate(&name, bash_args, None) {
-            self.emit_progress(Self::blocked_progress(&block_msg));
-            self.session.add_message(Message::tool_request(
-                id.clone(),
-                name.clone(),
-                args.clone(),
-            ));
-            self.session
-                .add_message(Message::tool_result(id, block_msg));
-            self.note_planning_block(instruction)?;
+        if let Some(block) = self.run_preflight(ctx, &name, &args, bash_args, None) {
+            self.record_tool_result(id, name, args, block.message);
+            if block.is_planning_block {
+                self.note_planning_block(instruction)?;
+            }
             return Ok(());
         }
-        if let Some(block_msg) =
-            self.check_pre_execution_verification_gate(&name, bash_args, None)
-        {
-            self.emit_progress(Self::blocked_progress(&block_msg));
-            self.session.add_message(Message::tool_request(
-                id.clone(),
-                name.clone(),
-                args.clone(),
-            ));
-            self.session
-                .add_message(Message::tool_result(id, block_msg));
-            return Ok(());
-        }
+
+        let tool = self.tools.get(&name).unwrap();
 
         // ── Execute ──
+        let tool_ctx = ToolContext::new(ctx, &self.options);
         let bash_cmd = if name == "bash" {
             Some(Self::extract_bash_command(&args))
         } else {
@@ -537,15 +558,12 @@ impl Agent {
         let mut result = match tool.execute(args.clone(), &tool_ctx) {
             Ok(r) => r,
             Err(e) => {
-                self.session.add_message(Message::tool_request(
-                    id.clone(),
-                    name.clone(),
-                    args.clone(),
-                ));
-                self.session.add_message(Message::tool_result(
+                self.record_tool_result(
                     id,
+                    name,
+                    args,
                     format!("error: tool execution failed: {}", e),
-                ));
+                );
                 return Ok(());
             }
         };
@@ -603,15 +621,16 @@ impl Agent {
 
         // Redact secrets from tool output before it enters the
         // model context — defense-in-depth against exfiltration.
-        let result = ctx.secrets().redact(&result);
+        let result = match ctx.secrets().redact(&result) {
+            std::borrow::Cow::Owned(s) => s,
+            std::borrow::Cow::Borrowed(_) => result,
+        };
 
-        self.session
-            .add_message(Message::tool_request(id.clone(), name, args));
-        self.session.add_message(Message::tool_result(id, result));
+        self.record_tool_result(id, name, args, result);
         Ok(())
     }
 
-    /// Handle an external tool call (pre-hooks, gates, execute, redact).
+    /// Handle an external tool call (preflight, execute, redact).
     fn execute_external_tool_call(
         &mut self,
         ctx: &ExecutionContext,
@@ -620,53 +639,21 @@ impl Agent {
         name: String,
         args: serde_json::Value,
     ) -> Result<()> {
-        let tool_ctx = ToolContext::new(ctx, &self.options);
-        let external_tool = self.external_tools.get(&name).unwrap();
-        let external_effect = external_tool.effect();
+        let external_effect = self.external_tools.get(&name).unwrap().effect();
 
-        if let Some(hooks) = self.hooks.get(&name) {
-            if !hooks.run_pre_hooks(&name, &args, &tool_ctx) {
-                self.session.add_message(Message::tool_request(
-                    id.clone(),
-                    name.clone(),
-                    args.clone(),
-                ));
-                self.session.add_message(Message::tool_result(
-                    id,
-                    format!("error: external tool '{}' blocked by pre-hook", name),
-                ));
-                return Ok(());
+        // ── Preflight: hooks + gates ──
+        if let Some(block) = self.run_preflight(ctx, &name, &args, None, Some(external_effect)) {
+            self.record_tool_result(id, name, args, block.message);
+            if block.is_planning_block {
+                self.note_planning_block(instruction)?;
             }
-        }
-
-        if let Some(block_msg) = self.check_planning_gate(&name, None, Some(external_effect)) {
-            self.emit_progress(Self::blocked_progress(&block_msg));
-            self.session.add_message(Message::tool_request(
-                id.clone(),
-                name.clone(),
-                args.clone(),
-            ));
-            self.session
-                .add_message(Message::tool_result(id, block_msg));
-            self.note_planning_block(instruction)?;
-            return Ok(());
-        }
-        if let Some(block_msg) =
-            self.check_pre_execution_verification_gate(&name, None, Some(external_effect))
-        {
-            self.emit_progress(Self::blocked_progress(&block_msg));
-            self.session.add_message(Message::tool_request(
-                id.clone(),
-                name.clone(),
-                args.clone(),
-            ));
-            self.session
-                .add_message(Message::tool_result(id, block_msg));
             return Ok(());
         }
 
         self.emit_progress(self.tool_progress(&name, &args));
         self.check_cancelled(ctx)?;
+        let tool_ctx = ToolContext::new(ctx, &self.options);
+        let external_tool = self.external_tools.get(&name).unwrap();
         let result = external_tool.execute(&args, &tool_ctx);
         self.check_cancelled(ctx)?;
         *self.external_tool_ran.borrow_mut() = true;
@@ -679,11 +666,6 @@ impl Agent {
             self.maybe_escalate_to_planning();
         }
 
-        self.session.add_message(Message::tool_request(
-            id.clone(),
-            name.clone(),
-            args.clone(),
-        ));
         let result_str = match result {
             Ok(r) => {
                 if matches!(r.effect, ExternalToolEffect::ExecutionStarted) {
@@ -692,16 +674,20 @@ impl Agent {
                 r.output
             }
             Err(e) => {
-                self.session.add_message(Message::tool_result(
+                self.record_tool_result(
                     id,
+                    name,
+                    args,
                     format!("error: external tool execution failed: {}", e),
-                ));
+                );
                 return Ok(());
             }
         };
-        let result_str = ctx.secrets().redact(&result_str);
-        self.session
-            .add_message(Message::tool_result(id, result_str));
+        let result_str = match ctx.secrets().redact(&result_str) {
+            std::borrow::Cow::Owned(s) => s,
+            std::borrow::Cow::Borrowed(_) => result_str,
+        };
+        self.record_tool_result(id, name, args, result_str);
         Ok(())
     }
 
@@ -1242,6 +1228,7 @@ impl Agent {
         let mut empty_response_retries = 0;
         let mut planning_phase_steps = 0usize;
         let mut planning_redirects = 0usize;
+        let mut provider_msgs = Vec::new();
 
         loop {
             self.check_cancelled(ctx)?;
@@ -1265,8 +1252,9 @@ impl Agent {
             self.emit_progress(ProgressUpdate::waiting_for_model(
                 self.current_progress_phase(),
             ));
+            self.session.fill_messages(&mut provider_msgs);
             let response = match self.provider.complete_with_cancel(
-                &self.session.messages(),
+                &provider_msgs,
                 &self.get_route(),
                 ctx.cancel_token(),
             ) {

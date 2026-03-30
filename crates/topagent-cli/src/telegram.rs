@@ -20,26 +20,10 @@ use crate::config::*;
 use crate::managed_files::write_private_file;
 use crate::progress::LiveProgress;
 
-pub(crate) fn run_telegram(
-    token: Option<String>,
-    api_key: Option<String>,
-    provider: String,
-    model: Option<String>,
-    workspace: Option<PathBuf>,
-    max_steps: Option<usize>,
-    max_retries: Option<usize>,
-    timeout_secs: Option<u64>,
-) -> Result<()> {
-    let config = resolve_telegram_mode_config(
-        token,
-        api_key,
-        provider,
-        model,
-        workspace,
-        max_steps,
-        max_retries,
-        timeout_secs,
-    )?;
+const TELEGRAM_HISTORY_VERSION: u32 = 1;
+
+pub(crate) fn run_telegram(token: Option<String>, params: CliParams) -> Result<()> {
+    let config = resolve_telegram_mode_config(token, params)?;
     let token = config.token;
     let workspace = config.workspace;
     // Register known secrets for redaction in tool output and final replies.
@@ -122,15 +106,16 @@ pub(crate) fn run_telegram(
                     let message_id = msg.message_id;
 
                     if msg.chat.chat_type != "private" {
-                        send_or_log(&adapter, chat_id, "This bot currently supports private chats only. Open a private chat with the bot and try again.");
+                        send_telegram(&adapter, chat_id, vec!["This bot currently supports private chats only. Open a private chat with the bot and try again.".into()], None);
                         continue;
                     }
 
                     let Some(text) = msg.text.clone() else {
-                        send_or_log(
+                        send_telegram(
                             &adapter,
                             chat_id,
-                            "This bot currently supports text messages only.",
+                            vec!["This bot currently supports text messages only.".into()],
+                            None,
                         );
                         continue;
                     };
@@ -155,7 +140,7 @@ pub(crate) fn run_telegram(
                              Send a plain text message to start a task.",
                             workspace_label, provider_label, model_label
                         );
-                        send_or_log(&adapter, chat_id, &reply);
+                        send_telegram(&adapter, chat_id, vec![reply], None);
                         continue;
                     }
 
@@ -165,7 +150,7 @@ pub(crate) fn run_telegram(
                         } else {
                             "No task is currently running.".to_string()
                         };
-                        send_telegram_chunks(&adapter, chat_id, vec![reply], None);
+                        send_telegram(&adapter, chat_id, vec![reply], None);
                         continue;
                     }
 
@@ -177,12 +162,12 @@ pub(crate) fn run_telegram(
                             session_manager.reset_chat(chat_id);
                             "Conversation history cleared.".to_string()
                         };
-                        send_telegram_chunks(&adapter, chat_id, vec![reply], None);
+                        send_telegram(&adapter, chat_id, vec![reply], None);
                         continue;
                     }
 
                     let response = session_manager.start_message(&ctx, &adapter, chat_id, text);
-                    send_telegram_chunks(&adapter, chat_id, response, Some(&secrets));
+                    send_telegram(&adapter, chat_id, response, Some(&secrets));
                     let _ = adapter.acknowledge(chat_id, message_id);
                 }
             }
@@ -207,17 +192,7 @@ pub(crate) fn run_telegram(
     }
 }
 
-fn send_or_log(adapter: &TelegramAdapter, chat_id: i64, text: &str) {
-    let outgoing = OutgoingMessage {
-        chat_id,
-        text: text.to_string(),
-    };
-    if let Err(e) = adapter.send_message(outgoing) {
-        error!("failed to send message: {}", e);
-    }
-}
-
-fn send_telegram_chunks(
+fn send_telegram(
     adapter: &TelegramAdapter,
     chat_id: i64,
     chunks: Vec<String>,
@@ -226,7 +201,7 @@ fn send_telegram_chunks(
     for chunk in chunks {
         // Last-mile secret redaction before the message reaches Telegram.
         let text = match secrets {
-            Some(reg) => reg.redact(&chunk),
+            Some(reg) => reg.redact(&chunk).into_owned(),
             None => chunk,
         };
         let outgoing = OutgoingMessage { chat_id, text };
@@ -575,14 +550,14 @@ impl ChatSessionManager {
                     } else {
                         topagent_core::channel::telegram::chunk_text(&response, max_len)
                     };
-                    send_telegram_chunks(&adapter, chat_id, chunks, Some(&worker_secrets));
+                    send_telegram(&adapter, chat_id, chunks, Some(&worker_secrets));
                 }
                 Err(topagent_core::Error::Stopped(_)) => {}
                 Err(e) => {
                     // When progress is active, the status message already shows the
                     // failure via ProgressUpdate::failed. Don't send a duplicate error.
                     if !has_progress {
-                        send_telegram_chunks(
+                        send_telegram(
                             &adapter,
                             chat_id,
                             vec![format!("Error: {}", e)],

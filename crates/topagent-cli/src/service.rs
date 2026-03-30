@@ -7,6 +7,11 @@ use std::process::{Command, Output};
 use crate::config::*;
 use crate::managed_files::*;
 
+const TOPAGENT_PROVIDER_KEY: &str = "TOPAGENT_PROVIDER";
+const TOPAGENT_MODEL_KEY: &str = "TOPAGENT_MODEL";
+const OPENROUTER_API_KEY_KEY: &str = "OPENROUTER_API_KEY";
+const TELEGRAM_BOT_TOKEN_KEY: &str = "TELEGRAM_BOT_TOKEN";
+
 #[derive(Debug, Clone)]
 pub(crate) struct ServicePaths {
     pub unit_dir: PathBuf,
@@ -49,25 +54,10 @@ struct InstallRoot {
 
 pub(crate) fn run_service_command(
     command: crate::ServiceCommands,
-    api_key: Option<String>,
-    provider: String,
-    model: Option<String>,
-    workspace: Option<PathBuf>,
-    max_steps: Option<usize>,
-    max_retries: Option<usize>,
-    timeout_secs: Option<u64>,
+    params: CliParams,
 ) -> Result<()> {
     match command {
-        crate::ServiceCommands::Install { token } => run_service_install(
-            token,
-            api_key,
-            provider,
-            model,
-            workspace,
-            max_steps,
-            max_retries,
-            timeout_secs,
-        ),
+        crate::ServiceCommands::Install { token } => run_service_install(token, params),
         crate::ServiceCommands::Status => run_service_status(),
         crate::ServiceCommands::Start => run_service_start(),
         crate::ServiceCommands::Stop => run_service_stop(),
@@ -78,21 +68,13 @@ pub(crate) fn run_service_command(
 
 // ── Install ──
 
-pub(crate) fn run_install(
-    api_key: Option<String>,
-    provider: String,
-    model: Option<String>,
-    workspace: Option<PathBuf>,
-    max_steps: Option<usize>,
-    max_retries: Option<usize>,
-    timeout_secs: Option<u64>,
-) -> Result<()> {
+pub(crate) fn run_install(params: CliParams) -> Result<()> {
     ensure_systemd_user_available()?;
     let paths = service_paths()?;
     assert_managed_or_absent(&paths.unit_path, "service unit")?;
     assert_managed_or_absent(&paths.env_path, "service env file")?;
     let existing_values = read_managed_env_metadata(&paths.env_path).unwrap_or_default();
-    let workspace = resolve_install_workspace_path(workspace, &existing_values)?;
+    let workspace = resolve_install_workspace_path(params.workspace, &existing_values)?;
 
     println!("TopAgent setup");
     println!("This will configure and start your Telegram background service.");
@@ -100,7 +82,7 @@ pub(crate) fn run_install(
 
     let api_key = prompt_for_install_value(
         "OpenRouter API key",
-        api_key.as_deref().or_else(|| {
+        params.api_key.as_deref().or_else(|| {
             existing_values
                 .get(OPENROUTER_API_KEY_KEY)
                 .map(String::as_str)
@@ -118,9 +100,9 @@ pub(crate) fn run_install(
     let config = TelegramModeConfig {
         token,
         api_key,
-        route: build_route(provider, model)?,
+        route: build_route(params.provider, params.model)?,
         workspace,
-        options: build_runtime_options(max_steps, max_retries, timeout_secs),
+        options: build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs),
     };
     install_service_with_config(&config, &paths)?;
 
@@ -317,26 +299,8 @@ pub(crate) fn service_paths() -> Result<ServicePaths> {
 
 // ── Service lifecycle ──
 
-fn run_service_install(
-    token: Option<String>,
-    api_key: Option<String>,
-    provider: String,
-    model: Option<String>,
-    workspace: Option<PathBuf>,
-    max_steps: Option<usize>,
-    max_retries: Option<usize>,
-    timeout_secs: Option<u64>,
-) -> Result<()> {
-    let config = resolve_telegram_mode_config(
-        token,
-        api_key,
-        provider,
-        model,
-        workspace,
-        max_steps,
-        max_retries,
-        timeout_secs,
-    )?;
+fn run_service_install(token: Option<String>, params: CliParams) -> Result<()> {
+    let config = resolve_telegram_mode_config(token, params)?;
     let paths = service_paths()?;
     install_service_with_config(&config, &paths)?;
     print_service_installed(
@@ -547,24 +511,8 @@ fn uninstall_service_setup(remove_binary: bool) -> Result<()> {
     let mut disabled = String::from("not attempted");
 
     if should_manage_service && systemd_available.is_ok() {
-        stopped = run_systemctl_user(&["stop", TELEGRAM_SERVICE_UNIT_NAME])
-            .map(|output| {
-                if output.status.success() {
-                    "yes".to_string()
-                } else {
-                    format!("no ({})", summarize_command_output(&output))
-                }
-            })
-            .unwrap_or_else(|err| format!("no ({})", err));
-        disabled = run_systemctl_user(&["disable", TELEGRAM_SERVICE_UNIT_NAME])
-            .map(|output| {
-                if output.status.success() {
-                    "yes".to_string()
-                } else {
-                    format!("no ({})", summarize_command_output(&output))
-                }
-            })
-            .unwrap_or_else(|err| format!("no ({})", err));
+        stopped = format_systemctl_result(&["stop", TELEGRAM_SERVICE_UNIT_NAME]);
+        disabled = format_systemctl_result(&["disable", TELEGRAM_SERVICE_UNIT_NAME]);
     } else if should_manage_service {
         if let Err(err) = &systemd_available {
             let note = format!("not attempted ({})", err);
@@ -620,15 +568,7 @@ fn uninstall_service_setup(remove_binary: bool) -> Result<()> {
 
     let mut daemon_reload = String::from("not needed");
     if should_manage_service && systemd_available.is_ok() {
-        daemon_reload = run_systemctl_user(&["daemon-reload"])
-            .map(|output| {
-                if output.status.success() {
-                    "yes".to_string()
-                } else {
-                    format!("no ({})", summarize_command_output(&output))
-                }
-            })
-            .unwrap_or_else(|err| format!("no ({})", err));
+        daemon_reload = format_systemctl_result(&["daemon-reload"]);
     }
 
     println!("TopAgent uninstall");
@@ -859,6 +799,18 @@ fn run_systemctl_user(args: &[&str]) -> Result<Output> {
         .args(args)
         .output()
         .with_context(|| format!("failed to run `systemctl --user {}`", args.join(" ")))
+}
+
+fn format_systemctl_result(args: &[&str]) -> String {
+    run_systemctl_user(args)
+        .map(|output| {
+            if output.status.success() {
+                "yes".to_string()
+            } else {
+                format!("no ({})", summarize_command_output(&output))
+            }
+        })
+        .unwrap_or_else(|err| format!("no ({})", err))
 }
 
 fn ensure_systemd_user_available() -> Result<()> {

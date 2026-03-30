@@ -8,11 +8,18 @@ use topagent_core::{
 pub(crate) const TELEGRAM_SERVICE_UNIT_NAME: &str = "topagent-telegram.service";
 pub(crate) const TOPAGENT_SERVICE_MANAGED_KEY: &str = "TOPAGENT_SERVICE_MANAGED";
 pub(crate) const TOPAGENT_WORKSPACE_KEY: &str = "TOPAGENT_WORKSPACE";
-pub(crate) const TOPAGENT_PROVIDER_KEY: &str = "TOPAGENT_PROVIDER";
-pub(crate) const TOPAGENT_MODEL_KEY: &str = "TOPAGENT_MODEL";
-pub(crate) const OPENROUTER_API_KEY_KEY: &str = "OPENROUTER_API_KEY";
-pub(crate) const TELEGRAM_BOT_TOKEN_KEY: &str = "TELEGRAM_BOT_TOKEN";
-pub(crate) const TELEGRAM_HISTORY_VERSION: u32 = 1;
+
+/// Shared CLI parameters threaded through install, service, telegram, and one-shot paths.
+#[derive(Debug, Clone)]
+pub(crate) struct CliParams {
+    pub api_key: Option<String>,
+    pub provider: String,
+    pub model: Option<String>,
+    pub workspace: Option<PathBuf>,
+    pub max_steps: Option<usize>,
+    pub max_retries: Option<usize>,
+    pub timeout_secs: Option<u64>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct TelegramModeConfig {
@@ -72,34 +79,35 @@ pub(crate) fn resolve_workspace_path_with_current_dir(
     })
 }
 
-pub(crate) fn require_openrouter_api_key(api_key: Option<String>) -> Result<String> {
-    let api_key = api_key
-        .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+/// Resolve a required parameter from an explicit value or environment variable.
+fn require_param(value: Option<String>, env_var: &str, missing_msg: &str) -> Result<String> {
+    let resolved = value
+        .or_else(|| std::env::var(env_var).ok())
         .unwrap_or_default()
         .trim()
         .to_string();
 
-    if api_key.is_empty() {
-        return Err(anyhow::anyhow!(
-            "OpenRouter API key required: set --api-key or OPENROUTER_API_KEY"
-        ));
+    if resolved.is_empty() {
+        return Err(anyhow::anyhow!("{}", missing_msg));
     }
 
-    Ok(api_key)
+    Ok(resolved)
+}
+
+pub(crate) fn require_openrouter_api_key(api_key: Option<String>) -> Result<String> {
+    require_param(
+        api_key,
+        "OPENROUTER_API_KEY",
+        "OpenRouter API key required: set --api-key or OPENROUTER_API_KEY",
+    )
 }
 
 pub(crate) fn require_telegram_token(token: Option<String>) -> Result<String> {
-    let token = token
-        .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-
-    if token.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Telegram bot token required: set --token or TELEGRAM_BOT_TOKEN"
-        ));
-    }
+    let token = require_param(
+        token,
+        "TELEGRAM_BOT_TOKEN",
+        "Telegram bot token required: set --token or TELEGRAM_BOT_TOKEN",
+    )?;
 
     if !token.contains(':') {
         return Err(anyhow::anyhow!(
@@ -119,20 +127,14 @@ pub(crate) fn build_route(provider: String, model: Option<String>) -> Result<Mod
 
 pub(crate) fn resolve_telegram_mode_config(
     token: Option<String>,
-    api_key: Option<String>,
-    provider: String,
-    model: Option<String>,
-    workspace: Option<PathBuf>,
-    max_steps: Option<usize>,
-    max_retries: Option<usize>,
-    timeout_secs: Option<u64>,
+    params: CliParams,
 ) -> Result<TelegramModeConfig> {
     Ok(TelegramModeConfig {
         token: require_telegram_token(token)?,
-        api_key: require_openrouter_api_key(api_key)?,
-        route: build_route(provider, model)?,
-        workspace: resolve_workspace_path(workspace)?,
-        options: build_runtime_options(max_steps, max_retries, timeout_secs),
+        api_key: require_openrouter_api_key(params.api_key)?,
+        route: build_route(params.provider, params.model)?,
+        workspace: resolve_workspace_path(params.workspace)?,
+        options: build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs),
     })
 }
 

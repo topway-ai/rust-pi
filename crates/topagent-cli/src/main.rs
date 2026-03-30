@@ -21,7 +21,10 @@ use topagent_core::{
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{build_route, build_runtime_options, require_openrouter_api_key, resolve_workspace_path};
+use crate::config::{
+    build_route, build_runtime_options, require_openrouter_api_key, resolve_workspace_path,
+    CliParams,
+};
 use crate::progress::LiveProgress;
 use crate::service::{run_install, run_service_command, run_status, run_uninstall};
 use crate::telegram::run_telegram;
@@ -126,78 +129,30 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let Cli {
-        api_key,
-        provider,
-        model,
-        workspace,
-        max_steps,
-        max_retries,
-        timeout_secs,
-        command,
-        instruction,
-    } = cli;
+    let command = cli.command;
+    let instruction = cli.instruction;
+    let params = CliParams {
+        api_key: cli.api_key,
+        provider: cli.provider,
+        model: cli.model,
+        workspace: cli.workspace,
+        max_steps: cli.max_steps,
+        max_retries: cli.max_retries,
+        timeout_secs: cli.timeout_secs,
+    };
 
     match command {
-        Some(Commands::Install) => {
-            return run_install(
-                api_key,
-                provider,
-                model,
-                workspace,
-                max_steps,
-                max_retries,
-                timeout_secs,
-            )
-        }
+        Some(Commands::Install) => return run_install(params),
         Some(Commands::Status) => return run_status(),
         Some(Commands::Uninstall) => return run_uninstall(),
-        Some(Commands::Service { command }) => {
-            return run_service_command(
-                command,
-                api_key,
-                provider,
-                model,
-                workspace,
-                max_steps,
-                max_retries,
-                timeout_secs,
-            )
-        }
-        Some(Commands::Telegram { token }) => run_telegram(
-            token,
-            api_key,
-            provider,
-            model,
-            workspace,
-            max_steps,
-            max_retries,
-            timeout_secs,
-        ),
-        Some(Commands::Run { instruction }) => run_one_shot(
-            api_key,
-            provider,
-            model,
-            workspace,
-            max_steps,
-            max_retries,
-            timeout_secs,
-            instruction,
-        ),
+        Some(Commands::Service { command }) => return run_service_command(command, params),
+        Some(Commands::Telegram { token }) => run_telegram(token, params),
+        Some(Commands::Run { instruction }) => run_one_shot(params, instruction),
         None => {
             let instruction = instruction.ok_or_else(|| {
                 anyhow::anyhow!("Instruction required. Run: topagent \"summarize this repository\"")
             })?;
-            run_one_shot(
-                api_key,
-                provider,
-                model,
-                workspace,
-                max_steps,
-                max_retries,
-                timeout_secs,
-                instruction,
-            )
+            run_one_shot(params, instruction)
         }
     }
 }
@@ -225,22 +180,13 @@ fn install_ctrlc_handler(
     .context("Failed to install Ctrl-C handler")
 }
 
-fn run_one_shot(
-    api_key: Option<String>,
-    provider: String,
-    model: Option<String>,
-    workspace: Option<PathBuf>,
-    max_steps: Option<usize>,
-    max_retries: Option<usize>,
-    timeout_secs: Option<u64>,
-    instruction: String,
-) -> Result<()> {
-    let workspace = resolve_workspace_path(workspace)?;
+fn run_one_shot(params: CliParams, instruction: String) -> Result<()> {
+    let workspace = resolve_workspace_path(params.workspace)?;
     let cancel_token = CancellationToken::new();
     let ctx = ExecutionContext::new(workspace).with_cancel_token(cancel_token.clone());
-    let options = build_runtime_options(max_steps, max_retries, timeout_secs);
-    let route = build_route(provider, model)?;
-    let api_key = require_openrouter_api_key(api_key)?;
+    let options = build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs);
+    let route = build_route(params.provider, params.model)?;
+    let api_key = require_openrouter_api_key(params.api_key)?;
 
     info!(
         "starting one-shot run | provider: {} | model: {} | workspace: {}",

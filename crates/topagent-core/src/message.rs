@@ -97,11 +97,11 @@ impl Message {
     pub fn redact_secrets(&self, registry: &crate::secrets::SecretRegistry) -> Self {
         let redacted_content = match &self.content {
             Content::Text { text } => Content::Text {
-                text: registry.redact(text),
+                text: registry.redact(text).into_owned(),
             },
             Content::ToolResult { id, result } => Content::ToolResult {
                 id: id.clone(),
-                result: registry.redact(result),
+                result: registry.redact(result).into_owned(),
             },
             // ToolRequest args are model-generated, not secret-bearing.
             other => other.clone(),
