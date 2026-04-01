@@ -130,20 +130,21 @@ run_post_install_setup() {
   local installed_bin="$1"
 
   if [[ -n "$TOPAGENT_SKIP_SETUP" ]]; then
-    return
+    return 1
   fi
 
   if [[ ! -r /dev/tty || ! -w /dev/tty ]]; then
-    return
+    return 1
   fi
 
   say "Starting interactive TopAgent setup"
   if "$installed_bin" install </dev/tty >/dev/tty 2>/dev/tty; then
-    return
+    return 0
   fi
 
   say "TopAgent was installed, but interactive setup did not complete. Run:"
   printf '  %s install\n' "$installed_bin"
+  return 1
 }
 
 main() {
@@ -161,9 +162,8 @@ main() {
     install_topagent_from_release
   fi
 
-  run_post_install_setup "$installed_bin"
-
-  cat <<EOF
+  if ! run_post_install_setup "$installed_bin"; then
+    cat <<EOF
 
 TopAgent installed.
 
@@ -181,6 +181,7 @@ Foreground one-shot run:
 Installed binary:
   $installed_bin
 EOF
+  fi
 
   if [[ -z "$TOPAGENT_INSTALL_ROOT" ]]; then
     cat <<EOF
