@@ -199,7 +199,7 @@ Plans and lessons are saved under `.topagent/plans/` and `.topagent/lessons/` re
 
 ### Config
 
-The env file at `~/.config/topagent/services/topagent-telegram.env` stores the API key, bot token, provider, model, workspace path, tool-authoring mode, and other runtime options. It has mode 0600 (owner-readable only). Re-running `topagent install` overwrites it.
+The env file at `~/.config/topagent/services/topagent-telegram.env` stores the API key, bot token, provider, model, workspace path, tool-authoring mode, and runtime limits (`max_steps`, `max_retries`, `timeout_secs`). It has mode 0600 (owner-readable only). The installed systemd unit reads this env file at startup, so re-running `topagent install` updates the next service run without duplicating those settings in `ExecStart`.
 
 ## TOPAGENT.md
 

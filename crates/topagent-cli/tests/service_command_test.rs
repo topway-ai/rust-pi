@@ -242,12 +242,17 @@ fn test_install_prompts_creates_install_adjacent_workspace_and_starts_service() 
     assert!(unit.contains("ExecStart="));
     assert!(unit.contains("telegram"));
     assert!(unit.contains(&harness.workspace_path().display().to_string()));
+    assert!(!unit.contains("--model"));
+    assert!(!unit.contains("--tool-authoring"));
 
     let env = fs::read_to_string(harness.env_path()).unwrap();
     assert!(env.contains("TELEGRAM_BOT_TOKEN="));
     assert!(env.contains("OPENROUTER_API_KEY="));
     assert!(env.contains("TOPAGENT_SERVICE_MANAGED=1"));
     assert!(env.contains(&harness.workspace_path().display().to_string()));
+    assert!(env.contains("TOPAGENT_MAX_STEPS=\"50\""));
+    assert!(env.contains("TOPAGENT_MAX_RETRIES=\"3\""));
+    assert!(env.contains("TOPAGENT_TIMEOUT_SECS=\"120\""));
 
     #[cfg(unix)]
     {
@@ -310,7 +315,7 @@ fn test_install_persists_explicit_tool_authoring_mode() {
         .success();
 
     let unit = fs::read_to_string(harness.unit_path()).unwrap();
-    assert!(unit.contains("--tool-authoring on"));
+    assert!(!unit.contains("--tool-authoring"));
 
     let env = fs::read_to_string(harness.env_path()).unwrap();
     assert!(env.contains("TOPAGENT_TOOL_AUTHORING=\"1\""));
@@ -319,6 +324,43 @@ fn test_install_persists_explicit_tool_authoring_mode() {
     assert!(status.status.success());
     let stdout = String::from_utf8_lossy(&status.stdout);
     assert!(stdout.contains("Tool authoring: on"));
+}
+
+#[test]
+fn test_reinstall_preserves_existing_model_and_runtime_settings_when_flags_are_omitted() {
+    let harness = ServiceHarness::new();
+    harness
+        .command()
+        .args([
+            "--model",
+            "anthropic/claude-3.7-sonnet",
+            "--max-steps",
+            "77",
+            "--max-retries",
+            "9",
+            "--timeout-secs",
+            "45",
+            "--tool-authoring",
+            "on",
+            "install",
+        ])
+        .write_stdin("test-openrouter-key\n123456:abcdef\n")
+        .assert()
+        .success();
+
+    harness
+        .command()
+        .arg("install")
+        .write_stdin("\n\n")
+        .assert()
+        .success();
+
+    let env = fs::read_to_string(harness.env_path()).unwrap();
+    assert!(env.contains("TOPAGENT_MODEL=\"anthropic/claude-3.7-sonnet\""));
+    assert!(env.contains("TOPAGENT_MAX_STEPS=\"77\""));
+    assert!(env.contains("TOPAGENT_MAX_RETRIES=\"9\""));
+    assert!(env.contains("TOPAGENT_TIMEOUT_SECS=\"45\""));
+    assert!(env.contains("TOPAGENT_TOOL_AUTHORING=\"1\""));
 }
 
 #[test]

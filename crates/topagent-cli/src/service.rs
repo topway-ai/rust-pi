@@ -8,7 +8,6 @@ use crate::config::*;
 use crate::managed_files::*;
 
 const TOPAGENT_PROVIDER_KEY: &str = "TOPAGENT_PROVIDER";
-const TOPAGENT_MODEL_KEY: &str = "TOPAGENT_MODEL";
 const OPENROUTER_API_KEY_KEY: &str = "OPENROUTER_API_KEY";
 const TELEGRAM_BOT_TOKEN_KEY: &str = "TELEGRAM_BOT_TOKEN";
 
@@ -100,17 +99,19 @@ pub(crate) fn run_install(params: CliParams) -> Result<()> {
     let config = TelegramModeConfig {
         token,
         api_key,
-        route: build_route(params.provider, params.model)?,
+        route: build_route_with_defaults(
+            params.provider,
+            params.model,
+            &TelegramModeDefaults::from_metadata(&existing_values),
+        )?,
         workspace,
-        options: build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs)
-            .with_generated_tool_authoring(resolve_generated_tool_authoring(
-                params.generated_tool_authoring,
-                parse_env_bool(
-                    existing_values
-                        .get(TOPAGENT_TOOL_AUTHORING_KEY)
-                        .map(String::as_str),
-                ),
-            )),
+        options: build_runtime_options_with_defaults(
+            params.max_steps,
+            params.max_retries,
+            params.timeout_secs,
+            params.generated_tool_authoring,
+            &TelegramModeDefaults::from_metadata(&existing_values),
+        ),
     };
     install_service_with_config(&config, &paths)?;
 
@@ -309,11 +310,7 @@ fn run_service_install(token: Option<String>, params: CliParams) -> Result<()> {
     let config = resolve_telegram_mode_config(
         token,
         params,
-        parse_env_bool(
-            existing_values
-                .get(TOPAGENT_TOOL_AUTHORING_KEY)
-                .map(String::as_str),
-        ),
+        TelegramModeDefaults::from_metadata(&existing_values),
     )?;
     install_service_with_config(&config, &paths)?;
     print_service_installed(
@@ -706,29 +703,8 @@ WantedBy=default.target
     ))
 }
 
-fn render_service_exec_start(current_exe: &Path, config: &TelegramModeConfig) -> String {
-    let mut args = vec![
-        current_exe.display().to_string(),
-        "--workspace".to_string(),
-        config.workspace.display().to_string(),
-        "--provider".to_string(),
-        config.route.provider_id.to_string(),
-        "--model".to_string(),
-        config.route.model_id.clone(),
-        "--max-steps".to_string(),
-        config.options.max_steps.to_string(),
-        "--max-retries".to_string(),
-        config.options.max_provider_retries.to_string(),
-        "--timeout-secs".to_string(),
-        config.options.provider_timeout_secs.to_string(),
-        "--tool-authoring".to_string(),
-        if config.options.enable_generated_tool_authoring {
-            "on".to_string()
-        } else {
-            "off".to_string()
-        },
-        "telegram".to_string(),
-    ];
+fn render_service_exec_start(current_exe: &Path, _config: &TelegramModeConfig) -> String {
+    let mut args = [current_exe.display().to_string(), "telegram".to_string()];
     args.iter_mut().for_each(|arg| {
         if arg.contains('\n') {
             *arg = arg.replace('\n', " ");
@@ -764,6 +740,9 @@ fn render_service_env_file(config: &TelegramModeConfig) -> Result<String> {
 {workspace_key}={workspace}
 {provider_key}={provider}
 {model_key}={model}
+{max_steps_key}={max_steps}
+{max_retries_key}={max_retries}
+{timeout_secs_key}={timeout_secs}
 {tool_authoring_key}={tool_authoring}
 ",
         header = TOPAGENT_MANAGED_HEADER,
@@ -776,6 +755,12 @@ fn render_service_env_file(config: &TelegramModeConfig) -> Result<String> {
         provider = quote_env_value(config.route.provider_id.as_str()),
         model_key = TOPAGENT_MODEL_KEY,
         model = quote_env_value(&config.route.model_id),
+        max_steps_key = TOPAGENT_MAX_STEPS_KEY,
+        max_steps = quote_env_value(&config.options.max_steps.to_string()),
+        max_retries_key = TOPAGENT_MAX_RETRIES_KEY,
+        max_retries = quote_env_value(&config.options.max_provider_retries.to_string()),
+        timeout_secs_key = TOPAGENT_TIMEOUT_SECS_KEY,
+        timeout_secs = quote_env_value(&config.options.provider_timeout_secs.to_string()),
         tool_authoring_key = TOPAGENT_TOOL_AUTHORING_KEY,
         tool_authoring = quote_env_value(if config.options.enable_generated_tool_authoring {
             "1"

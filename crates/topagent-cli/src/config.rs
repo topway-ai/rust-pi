@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use topagent_core::{
     model::{ModelRoute, ProviderId},
@@ -8,7 +9,11 @@ use topagent_core::{
 pub(crate) const TELEGRAM_SERVICE_UNIT_NAME: &str = "topagent-telegram.service";
 pub(crate) const TOPAGENT_SERVICE_MANAGED_KEY: &str = "TOPAGENT_SERVICE_MANAGED";
 pub(crate) const TOPAGENT_WORKSPACE_KEY: &str = "TOPAGENT_WORKSPACE";
+pub(crate) const TOPAGENT_MODEL_KEY: &str = "TOPAGENT_MODEL";
 pub(crate) const TOPAGENT_TOOL_AUTHORING_KEY: &str = "TOPAGENT_TOOL_AUTHORING";
+pub(crate) const TOPAGENT_MAX_STEPS_KEY: &str = "TOPAGENT_MAX_STEPS";
+pub(crate) const TOPAGENT_MAX_RETRIES_KEY: &str = "TOPAGENT_MAX_RETRIES";
+pub(crate) const TOPAGENT_TIMEOUT_SECS_KEY: &str = "TOPAGENT_TIMEOUT_SECS";
 
 /// Shared CLI parameters threaded through install, service, telegram, and one-shot paths.
 #[derive(Debug, Clone)]
@@ -32,6 +37,55 @@ pub(crate) struct TelegramModeConfig {
     pub options: RuntimeOptions,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TelegramModeDefaults {
+    pub workspace: Option<PathBuf>,
+    pub model: Option<String>,
+    pub max_steps: Option<usize>,
+    pub max_retries: Option<usize>,
+    pub timeout_secs: Option<u64>,
+    pub generated_tool_authoring: Option<bool>,
+}
+
+impl TelegramModeDefaults {
+    pub(crate) fn from_metadata(values: &HashMap<String, String>) -> Self {
+        Self {
+            workspace: values.get(TOPAGENT_WORKSPACE_KEY).map(PathBuf::from),
+            model: values.get(TOPAGENT_MODEL_KEY).cloned(),
+            max_steps: parse_optional_usize(values.get(TOPAGENT_MAX_STEPS_KEY).map(String::as_str)),
+            max_retries: parse_optional_usize(
+                values.get(TOPAGENT_MAX_RETRIES_KEY).map(String::as_str),
+            ),
+            timeout_secs: parse_optional_u64(
+                values.get(TOPAGENT_TIMEOUT_SECS_KEY).map(String::as_str),
+            ),
+            generated_tool_authoring: parse_env_bool(
+                values.get(TOPAGENT_TOOL_AUTHORING_KEY).map(String::as_str),
+            ),
+        }
+    }
+
+    pub(crate) fn from_process_env() -> Self {
+        Self {
+            workspace: std::env::var_os(TOPAGENT_WORKSPACE_KEY).map(PathBuf::from),
+            model: std::env::var(TOPAGENT_MODEL_KEY)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            max_steps: parse_optional_usize(std::env::var(TOPAGENT_MAX_STEPS_KEY).ok().as_deref()),
+            max_retries: parse_optional_usize(
+                std::env::var(TOPAGENT_MAX_RETRIES_KEY).ok().as_deref(),
+            ),
+            timeout_secs: parse_optional_u64(
+                std::env::var(TOPAGENT_TIMEOUT_SECS_KEY).ok().as_deref(),
+            ),
+            generated_tool_authoring: parse_env_bool(
+                std::env::var(TOPAGENT_TOOL_AUTHORING_KEY).ok().as_deref(),
+            ),
+        }
+    }
+}
+
 pub(crate) fn build_runtime_options(
     max_steps: Option<usize>,
     max_retries: Option<usize>,
@@ -41,6 +95,24 @@ pub(crate) fn build_runtime_options(
         .with_max_steps(max_steps.unwrap_or(50))
         .with_max_provider_retries(max_retries.unwrap_or(3))
         .with_provider_timeout_secs(timeout_secs.unwrap_or(120))
+}
+
+pub(crate) fn build_runtime_options_with_defaults(
+    max_steps: Option<usize>,
+    max_retries: Option<usize>,
+    timeout_secs: Option<u64>,
+    generated_tool_authoring: Option<bool>,
+    defaults: &TelegramModeDefaults,
+) -> RuntimeOptions {
+    build_runtime_options(
+        max_steps.or(defaults.max_steps),
+        max_retries.or(defaults.max_retries),
+        timeout_secs.or(defaults.timeout_secs),
+    )
+    .with_generated_tool_authoring(resolve_generated_tool_authoring(
+        generated_tool_authoring,
+        defaults.generated_tool_authoring,
+    ))
 }
 
 pub(crate) fn resolve_generated_tool_authoring(
@@ -70,6 +142,20 @@ pub(crate) fn parse_env_bool(value: Option<&str>) -> Option<bool> {
         }
         _ => None,
     }
+}
+
+pub(crate) fn parse_optional_usize(value: Option<&str>) -> Option<usize> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse().ok())
+}
+
+pub(crate) fn parse_optional_u64(value: Option<&str>) -> Option<u64> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse().ok())
 }
 
 pub(crate) fn resolve_workspace_path(workspace: Option<PathBuf>) -> Result<PathBuf> {
@@ -155,21 +241,31 @@ pub(crate) fn build_route(provider: String, model: Option<String>) -> Result<Mod
     Ok(ModelRoute::new(provider_id, base.model_id))
 }
 
+pub(crate) fn build_route_with_defaults(
+    provider: String,
+    model: Option<String>,
+    defaults: &TelegramModeDefaults,
+) -> Result<ModelRoute> {
+    build_route(provider, model.or_else(|| defaults.model.clone()))
+}
+
 pub(crate) fn resolve_telegram_mode_config(
     token: Option<String>,
     params: CliParams,
-    persisted_generated_tool_authoring: Option<bool>,
+    defaults: TelegramModeDefaults,
 ) -> Result<TelegramModeConfig> {
     Ok(TelegramModeConfig {
         token: require_telegram_token(token)?,
         api_key: require_openrouter_api_key(params.api_key)?,
-        route: build_route(params.provider, params.model)?,
-        workspace: resolve_workspace_path(params.workspace)?,
-        options: build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs)
-            .with_generated_tool_authoring(resolve_generated_tool_authoring(
-                params.generated_tool_authoring,
-                persisted_generated_tool_authoring,
-            )),
+        route: build_route_with_defaults(params.provider, params.model, &defaults)?,
+        workspace: resolve_workspace_path(params.workspace.or_else(|| defaults.workspace.clone()))?,
+        options: build_runtime_options_with_defaults(
+            params.max_steps,
+            params.max_retries,
+            params.timeout_secs,
+            params.generated_tool_authoring,
+            &defaults,
+        ),
     })
 }
 

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -22,7 +23,8 @@ const TELEGRAM_CHAT_SETTINGS_VERSION: u32 = 1;
 const MAX_PERSISTED_TRANSCRIPT_MESSAGES: usize = 100;
 
 pub(crate) fn run_telegram(token: Option<String>, params: CliParams) -> Result<()> {
-    let config = resolve_telegram_mode_config(token, params, None)?;
+    let config =
+        resolve_telegram_mode_config(token, params, TelegramModeDefaults::from_process_env())?;
     let token = config.token;
     let workspace = config.workspace;
     // Register known secrets for redaction in tool output and final replies.
@@ -487,6 +489,7 @@ pub(crate) struct ChatSessionManager {
     options: RuntimeOptions,
     history_store: ChatHistoryStore,
     settings_store: ChatSettingsStore,
+    tool_authoring_cache: RefCell<HashMap<i64, bool>>,
     memory: WorkspaceMemory,
     secrets: topagent_core::SecretRegistry,
     pub sessions: HashMap<i64, RunningChatTask>,
@@ -530,6 +533,7 @@ impl ChatSessionManager {
             options,
             history_store: ChatHistoryStore::new(workspace_root.clone()),
             settings_store: ChatSettingsStore::new(workspace_root),
+            tool_authoring_cache: RefCell::new(HashMap::new()),
             memory,
             secrets,
             sessions: HashMap::new(),
@@ -563,7 +567,11 @@ impl ChatSessionManager {
     }
 
     fn chat_tool_authoring_enabled(&self, chat_id: i64) -> bool {
-        match self.settings_store.load_tool_authoring(chat_id) {
+        if let Some(enabled) = self.tool_authoring_cache.borrow().get(&chat_id).copied() {
+            return enabled;
+        }
+
+        let enabled = match self.settings_store.load_tool_authoring(chat_id) {
             Ok(Some(enabled)) => enabled,
             Ok(None) => self.options.enable_generated_tool_authoring,
             Err(err) => {
@@ -575,11 +583,18 @@ impl ChatSessionManager {
                 );
                 self.options.enable_generated_tool_authoring
             }
-        }
+        };
+        self.tool_authoring_cache
+            .borrow_mut()
+            .insert(chat_id, enabled);
+        enabled
     }
 
     fn set_chat_tool_authoring(&mut self, chat_id: i64, enabled: bool) -> Result<()> {
         self.settings_store.save_tool_authoring(chat_id, enabled)?;
+        self.tool_authoring_cache
+            .borrow_mut()
+            .insert(chat_id, enabled);
         Ok(())
     }
 
