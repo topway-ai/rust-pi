@@ -75,6 +75,10 @@ impl OpenRouterProvider {
 }
 
 impl Provider for OpenRouterProvider {
+    fn set_tool_specs(&mut self, tools: Vec<ToolSpec>) {
+        self.tools = tools;
+    }
+
     fn complete(
         &self,
         messages: &[Message],

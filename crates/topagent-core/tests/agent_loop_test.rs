@@ -3,8 +3,9 @@ use tempfile::TempDir;
 use topagent_core::{
     context::ExecutionContext,
     tools::{BashTool, EditTool, GitDiffTool, ReadTool, Tool, WriteTool},
-    Agent, CancellationToken, Content, Error, ExecutionStage, Message, ProgressKind,
+    Agent, CancellationToken, Content, Error, ExecutionStage, Message, ModelRoute, ProgressKind,
     ProgressUpdate, Provider, ProviderResponse, Role, RuntimeOptions, TaskResult, ToolCallEntry,
+    ToolSpec,
 };
 
 fn make_test_context() -> (ExecutionContext, TempDir) {
@@ -125,6 +126,45 @@ impl Provider for RunawayProvider {
             name: "bash".into(),
             args: serde_json::json!({"command": "echo loop"}),
         })
+    }
+}
+
+struct RecordingProvider {
+    response: ProviderResponse,
+    last_route: Arc<RwLock<Option<ModelRoute>>>,
+    tool_names: Arc<RwLock<Vec<String>>>,
+}
+
+impl RecordingProvider {
+    fn new(response: ProviderResponse) -> Self {
+        Self {
+            response,
+            last_route: Arc::new(RwLock::new(None)),
+            tool_names: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    fn last_route_handle(&self) -> Arc<RwLock<Option<ModelRoute>>> {
+        self.last_route.clone()
+    }
+
+    fn tool_names_handle(&self) -> Arc<RwLock<Vec<String>>> {
+        self.tool_names.clone()
+    }
+}
+
+impl Provider for RecordingProvider {
+    fn complete(
+        &self,
+        _messages: &[Message],
+        route: &topagent_core::ModelRoute,
+    ) -> topagent_core::Result<ProviderResponse> {
+        *self.last_route.write().unwrap() = Some(route.clone());
+        Ok(self.response.clone())
+    }
+
+    fn set_tool_specs(&mut self, tools: Vec<ToolSpec>) {
+        *self.tool_names.write().unwrap() = tools.into_iter().map(|tool| tool.name).collect();
     }
 }
 
@@ -697,6 +737,48 @@ fn test_genesis_tools_become_external_after_verification() {
         external.get("my_tool").is_some(),
         "verified generated tool should be loaded as external tool"
     );
+}
+
+#[test]
+fn test_generated_tool_is_usable_without_waiting_for_next_run() {
+    let (ctx, _temp) = make_test_context();
+    let responses = vec![
+        ProviderResponse::ToolCall {
+            id: "create".into(),
+            name: "create_tool".into(),
+            args: serde_json::json!({
+                "requirement": "echo a greeting",
+                "name": "hello_tool",
+                "description": "echo a greeting",
+                "script": "printf 'hello %s\\n' \"$1\"",
+                "inputs": [
+                    {"name": "name", "description": "name to greet", "required": true}
+                ],
+                "argv_template": ["{name}"],
+                "verification_args": ["world"],
+                "expected_output_contains": "hello world"
+            }),
+        },
+        ProviderResponse::ToolCall {
+            id: "use".into(),
+            name: "hello_tool".into(),
+            args: serde_json::json!({"name": "codex"}),
+        },
+        ProviderResponse::Message(Message::assistant("done".to_string())),
+    ];
+    let provider = topagent_core::ScriptedProvider::new(responses);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+
+    let result = agent.run(&ctx, "create a helper tool and use it immediately");
+    assert!(result.is_ok());
+
+    let messages = agent.conversation_messages();
+    assert!(messages.iter().any(|message| {
+        matches!(
+            &message.content,
+            Content::ToolResult { result, .. } if result.contains("hello codex")
+        )
+    }));
 }
 
 #[test]
@@ -2092,6 +2174,51 @@ fn test_route_selection_follows_execution_stage() {
         route.model_id, "edit-model",
         "route should use edit model after entering edit stage"
     );
+}
+
+#[test]
+fn test_agent_uses_configured_base_route_for_provider_calls() {
+    let (ctx, _temp) = make_test_context();
+    let route = ModelRoute::openrouter("custom/base-model");
+    let provider = RecordingProvider::new(ProviderResponse::Message(Message::assistant("done")));
+    let last_route = provider.last_route_handle();
+    let mut agent = Agent::with_route(
+        Box::new(provider),
+        route.clone(),
+        make_tools(),
+        RuntimeOptions::default(),
+    );
+
+    let result = agent.run(&ctx, "summarize the repository");
+    assert!(result.is_ok());
+    assert_eq!(last_route.read().unwrap().clone(), Some(route));
+}
+
+#[test]
+fn test_agent_syncs_internal_and_external_tools_to_provider() {
+    let (ctx, temp) = make_test_context();
+    write_workspace_external_tools(
+        &temp,
+        r#"[{"name": "workspace_helper", "description": "workspace helper", "command": "echo", "argv_template": ["{target}"]}]"#,
+    );
+
+    let provider = RecordingProvider::new(ProviderResponse::Message(Message::assistant("done")));
+    let tool_names = provider.tool_names_handle();
+    let mut agent = Agent::with_route(
+        Box::new(provider),
+        ModelRoute::default(),
+        make_tools(),
+        RuntimeOptions::default(),
+    );
+
+    let result = agent.run(&ctx, "inspect the repository");
+    assert!(result.is_ok());
+
+    let tool_names = tool_names.read().unwrap().clone();
+    assert!(tool_names.contains(&"read".to_string()));
+    assert!(tool_names.contains(&"update_plan".to_string()));
+    assert!(tool_names.contains(&"create_tool".to_string()));
+    assert!(tool_names.contains(&"workspace_helper".to_string()));
 }
 
 #[test]

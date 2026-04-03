@@ -112,8 +112,26 @@ impl Agent {
         Self::with_options(provider, tools, RuntimeOptions::default())
     }
 
+    pub fn with_route(
+        provider: Box<dyn Provider>,
+        route: ModelRoute,
+        tools: Vec<Box<dyn Tool>>,
+        options: RuntimeOptions,
+    ) -> Self {
+        Self::with_route_and_options(provider, route, tools, options)
+    }
+
     pub fn with_options(
         provider: Box<dyn Provider>,
+        tools: Vec<Box<dyn Tool>>,
+        options: RuntimeOptions,
+    ) -> Self {
+        Self::with_route_and_options(provider, ModelRoute::default(), tools, options)
+    }
+
+    fn with_route_and_options(
+        provider: Box<dyn Provider>,
+        route: ModelRoute,
         tools: Vec<Box<dyn Tool>>,
         options: RuntimeOptions,
     ) -> Self {
@@ -143,7 +161,6 @@ impl Agent {
         registry.add(Box::new(ImplementToolProposalTool::new()));
         registry.add(Box::new(ListToolProposalsTool::new()));
 
-        let resolved_route = ModelRoute::default();
         Self {
             session: Session::new(),
             provider,
@@ -158,7 +175,7 @@ impl Agent {
             planning_required_for_task: false,
             task_mode: plan::TaskMode::PlanAndExecute,
             planning_escalated: false,
-            resolved_route,
+            resolved_route: route,
             execution_stage: ExecutionStage::Research,
             external_tool_ran: RefCell::new(false),
             run_baseline: RefCell::new(None),
@@ -616,6 +633,10 @@ impl Agent {
 
         if Self::is_plan_tool(&name) && self.plan_exists() {
             self.deactivate_planning_gate();
+        }
+
+        if Self::mutates_generated_tool_surface(&name) {
+            self.reload_workspace_tools(&ctx.workspace_root)?;
         }
 
         // Redact secrets from tool output before it enters the
@@ -1309,7 +1330,14 @@ impl Agent {
         self.external_tools = ExternalToolRegistry::new();
         self.load_workspace_external_tools(workspace_root)?;
         self.load_generated_tools_from_workspace(workspace_root)?;
+        self.sync_provider_tools();
         Ok(())
+    }
+
+    fn sync_provider_tools(&mut self) {
+        let mut tool_specs = self.tools.specs();
+        tool_specs.extend(self.external_tools.specs());
+        self.provider.set_tool_specs(tool_specs);
     }
 
     fn reset_run_state(&mut self, workspace_root: &Path, instruction: &str) {
@@ -1368,6 +1396,13 @@ impl Agent {
         }
 
         Ok(system_prompt)
+    }
+
+    fn mutates_generated_tool_surface(tool_name: &str) -> bool {
+        matches!(
+            tool_name,
+            "create_tool" | "repair_tool" | "delete_generated_tool" | "implement_tool_proposal"
+        )
     }
 
     fn build_proof_of_work(&self, response: &str, workspace_root: &Path) -> String {

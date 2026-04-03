@@ -214,15 +214,16 @@ fn run_one_shot(params: CliParams, instruction: String) -> Result<()> {
     );
     info!("instruction: {}", instruction);
 
+    let tools = default_tools();
     let provider = create_provider(
         &route,
         &api_key,
-        default_tools().specs(),
+        tools.specs(),
         options.provider_timeout_secs,
     )?;
 
     let heartbeat_interval = Duration::from_secs(options.progress_heartbeat_secs);
-    let mut agent = Agent::with_options(provider, default_tools().into_inner(), options);
+    let mut agent = Agent::with_route(provider, route, tools.into_inner(), options);
     let progress = LiveProgress::for_cli(heartbeat_interval);
     let progress_callback = progress.callback();
     install_ctrlc_handler(cancel_token, progress_callback.clone())?;

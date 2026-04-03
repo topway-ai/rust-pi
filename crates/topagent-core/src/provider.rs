@@ -1,8 +1,10 @@
-use crate::{CancellationToken, Error, Message, ModelRoute, Result};
+use crate::{CancellationToken, Error, Message, ModelRoute, Result, ToolSpec};
 use std::sync::{Arc, RwLock};
 
 pub trait Provider: Send + Sync {
     fn complete(&self, messages: &[Message], route: &ModelRoute) -> Result<ProviderResponse>;
+
+    fn set_tool_specs(&mut self, _tools: Vec<ToolSpec>) {}
 
     fn complete_with_cancel(
         &self,

@@ -429,15 +429,20 @@ impl ChatSessionManager {
     }
 
     pub fn create_agent(&self) -> Agent {
+        let tools = default_tools();
         let provider = create_provider(
             &self.route,
             &self.api_key,
-            default_tools().specs(),
+            tools.specs(),
             self.options.provider_timeout_secs,
         )
         .expect("failed to create provider");
-        let tools = default_tools();
-        Agent::with_options(provider, tools.into_inner(), self.options.clone())
+        Agent::with_route(
+            provider,
+            self.route.clone(),
+            tools.into_inner(),
+            self.options.clone(),
+        )
     }
 
     fn build_memory_context(&self, chat_id: i64, instruction: &str) -> Option<String> {
