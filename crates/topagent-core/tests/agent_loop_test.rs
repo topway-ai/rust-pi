@@ -170,6 +170,63 @@ impl Provider for RecordingProvider {
     }
 }
 
+struct CallTrackingProvider {
+    responses: Vec<ProviderResponse>,
+    response_idx: Arc<RwLock<usize>>,
+    complete_calls: Arc<RwLock<usize>>,
+    complete_with_cancel_calls: Arc<RwLock<usize>>,
+}
+
+impl CallTrackingProvider {
+    fn new(responses: Vec<ProviderResponse>) -> Self {
+        Self {
+            responses,
+            response_idx: Arc::new(RwLock::new(0)),
+            complete_calls: Arc::new(RwLock::new(0)),
+            complete_with_cancel_calls: Arc::new(RwLock::new(0)),
+        }
+    }
+
+    fn complete_calls(&self) -> Arc<RwLock<usize>> {
+        self.complete_calls.clone()
+    }
+
+    fn complete_with_cancel_calls(&self) -> Arc<RwLock<usize>> {
+        self.complete_with_cancel_calls.clone()
+    }
+
+    fn next_response(&self) -> topagent_core::Result<ProviderResponse> {
+        let mut idx = self.response_idx.write().unwrap();
+        if let Some(response) = self.responses.get(*idx).cloned() {
+            *idx += 1;
+            Ok(response)
+        } else {
+            Err(Error::Provider("provider exhausted".into()))
+        }
+    }
+}
+
+impl Provider for CallTrackingProvider {
+    fn complete(
+        &self,
+        _messages: &[Message],
+        _route: &topagent_core::ModelRoute,
+    ) -> topagent_core::Result<ProviderResponse> {
+        *self.complete_calls.write().unwrap() += 1;
+        self.next_response()
+    }
+
+    fn complete_with_cancel(
+        &self,
+        _messages: &[Message],
+        _route: &topagent_core::ModelRoute,
+        _cancel: Option<&CancellationToken>,
+    ) -> topagent_core::Result<ProviderResponse> {
+        *self.complete_with_cancel_calls.write().unwrap() += 1;
+        self.next_response()
+    }
+}
+
 struct MalformedArgsProvider {
     remaining: Arc<RwLock<usize>>,
 }
@@ -251,6 +308,56 @@ fn test_agent_executes_tool_and_continues() {
     let result = agent.run(&ctx, "run a command");
     assert!(result.is_ok());
     assert!(result.unwrap().contains("Command executed successfully"));
+}
+
+#[test]
+fn test_ambiguous_task_classification_uses_cancel_aware_provider_entrypoint() {
+    let (ctx, _temp) = make_test_context();
+    let instruction = "Please carefully review the current situation in this repository, decide how to proceed, and carry the task forward while preserving behavior and keeping the implementation coherent.";
+    let provider = CallTrackingProvider::new(vec![
+        ProviderResponse::Message(Message::assistant("direct")),
+        ProviderResponse::Message(Message::assistant("done")),
+    ]);
+    let complete_calls = provider.complete_calls();
+    let complete_with_cancel_calls = provider.complete_with_cancel_calls();
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+
+    let result = agent.run(&ctx, instruction).unwrap();
+
+    assert_eq!(result, "done");
+    assert_eq!(*complete_calls.read().unwrap(), 0);
+    assert!(
+        *complete_with_cancel_calls.read().unwrap() >= 2,
+        "expected cancel-aware provider calls for classification and execution"
+    );
+}
+
+#[test]
+fn test_fallback_plan_generation_uses_cancel_aware_provider_entrypoint() {
+    let (ctx, _temp) = make_test_context();
+    let instruction = "Please carefully review the current situation in this repository, decide how to proceed, and carry the task forward while preserving behavior, coordinating the relevant details, and staying methodical throughout the work.";
+    let provider = CallTrackingProvider::new(vec![
+        ProviderResponse::Message(Message::assistant("plan")),
+        ProviderResponse::Message(Message::assistant("execute")),
+        ProviderResponse::Message(Message::assistant("I will just start working now.")),
+        ProviderResponse::Message(Message::assistant("Still working without a plan.")),
+        ProviderResponse::Message(Message::assistant(
+            "1. Inspect the relevant files\n2. Apply the requested work\n3. Verify the result",
+        )),
+        ProviderResponse::Message(Message::assistant("done")),
+    ]);
+    let complete_calls = provider.complete_calls();
+    let complete_with_cancel_calls = provider.complete_with_cancel_calls();
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+
+    let result = agent.run(&ctx, instruction).unwrap();
+
+    assert!(!result.trim().is_empty());
+    assert_eq!(*complete_calls.read().unwrap(), 0);
+    assert!(
+        *complete_with_cancel_calls.read().unwrap() > 0,
+        "expected cancel-aware provider calls on the fallback-planning path"
+    );
 }
 
 #[test]

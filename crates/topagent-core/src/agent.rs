@@ -314,64 +314,91 @@ impl Agent {
     /// 2. Lightweight LLM classification call for ambiguous cases.
     ///
     /// Falls back to `false` (direct execution) if the LLM call fails.
-    fn classify_task(&self, instruction: &str) -> bool {
+    fn classify_task(
+        &self,
+        instruction: &str,
+        cancel: Option<&crate::CancellationToken>,
+    ) -> Result<bool> {
         match plan::heuristic_fast_path(instruction) {
-            Some(result) => result,
-            None => self.classify_task_with_llm(instruction),
+            Some(result) => Ok(result),
+            None => self.classify_task_with_llm(instruction, cancel),
         }
     }
 
-    fn classify_task_with_llm(&self, instruction: &str) -> bool {
+    fn classify_task_with_llm(
+        &self,
+        instruction: &str,
+        cancel: Option<&crate::CancellationToken>,
+    ) -> Result<bool> {
         let (system_prompt, user_msg) = plan::build_classification_messages(instruction);
         let messages = vec![Message::system(system_prompt), Message::user(user_msg)];
         let route = self.resolved_route.clone();
 
-        match self.provider.complete(&messages, &route) {
-            Ok(ProviderResponse::Message(msg)) => {
-                if let Some(text) = msg.as_text() {
-                    plan::parse_classification_response(text)
-                } else {
-                    false
-                }
-            }
-            _ => false,
+        match self
+            .provider
+            .complete_with_cancel(&messages, &route, cancel)
+        {
+            Ok(ProviderResponse::Message(msg)) => Ok(msg
+                .as_text()
+                .map(plan::parse_classification_response)
+                .unwrap_or(false)),
+            Ok(_) => Ok(false),
+            Err(Error::Stopped(_)) => Err(Self::stop_error()),
+            Err(_) => Ok(false),
         }
     }
 
-    fn classify_task_mode(&self, instruction: &str) -> plan::TaskMode {
+    fn classify_task_mode(
+        &self,
+        instruction: &str,
+        cancel: Option<&crate::CancellationToken>,
+    ) -> Result<plan::TaskMode> {
         match plan::task_mode_fast_path(instruction) {
-            Some(mode) => mode,
-            None => self.classify_task_mode_with_llm(instruction),
+            Some(mode) => Ok(mode),
+            None => self.classify_task_mode_with_llm(instruction, cancel),
         }
     }
 
-    fn classify_task_mode_with_llm(&self, instruction: &str) -> plan::TaskMode {
+    fn classify_task_mode_with_llm(
+        &self,
+        instruction: &str,
+        cancel: Option<&crate::CancellationToken>,
+    ) -> Result<plan::TaskMode> {
         let (system_prompt, user_msg) = plan::build_task_mode_messages(instruction);
         let messages = vec![Message::system(system_prompt), Message::user(user_msg)];
         let route = self.resolved_route.clone();
 
-        match self.provider.complete(&messages, &route) {
-            Ok(ProviderResponse::Message(msg)) => msg
+        match self
+            .provider
+            .complete_with_cancel(&messages, &route, cancel)
+        {
+            Ok(ProviderResponse::Message(msg)) => Ok(msg
                 .as_text()
                 .and_then(plan::parse_task_mode_response)
-                .unwrap_or(plan::TaskMode::PlanAndExecute),
-            _ => plan::TaskMode::PlanAndExecute,
+                .unwrap_or(plan::TaskMode::PlanAndExecute)),
+            Ok(_) => Ok(plan::TaskMode::PlanAndExecute),
+            Err(Error::Stopped(_)) => Err(Self::stop_error()),
+            Err(_) => Ok(plan::TaskMode::PlanAndExecute),
         }
     }
 
     /// Break a planning deadlock by generating a real plan via the LLM.
     /// Falls back to a minimal emergency plan if the LLM call fails.
     /// Always deactivates the planning gate afterward.
-    fn generate_or_fallback_plan(&mut self, instruction: &str) {
+    fn generate_or_fallback_plan(
+        &mut self,
+        instruction: &str,
+        cancel: Option<&crate::CancellationToken>,
+    ) -> Result<()> {
         if self.plan_exists() {
             self.deactivate_planning_gate();
-            return;
+            return Ok(());
         }
 
         // Try a dedicated LLM plan-generation call.
-        if self.try_generate_plan(instruction) {
+        if self.try_generate_plan(instruction, cancel)? {
             self.deactivate_planning_gate();
-            return;
+            return Ok(());
         }
 
         // LLM failed — create a minimal emergency plan so the agent can proceed.
@@ -381,24 +408,34 @@ impl Agent {
             plan.add_item("Verify the result".to_string());
         }
         self.deactivate_planning_gate();
+        Ok(())
     }
 
     /// Attempt to generate a concrete plan via a single LLM call.
     /// Returns true if a non-empty plan was created.
-    fn try_generate_plan(&mut self, instruction: &str) -> bool {
+    fn try_generate_plan(
+        &mut self,
+        instruction: &str,
+        cancel: Option<&crate::CancellationToken>,
+    ) -> Result<bool> {
         let prompt = plan::build_plan_generation_prompt(instruction);
         let messages = vec![Message::system(prompt.0), Message::user(prompt.1)];
         let route = self.resolved_route.clone();
 
-        let text = match self.provider.complete(&messages, &route) {
+        let text = match self
+            .provider
+            .complete_with_cancel(&messages, &route, cancel)
+        {
             Ok(ProviderResponse::Message(msg)) => msg.as_text().map(|s| s.to_string()),
-            _ => None,
+            Ok(_) => None,
+            Err(Error::Stopped(_)) => return Err(Self::stop_error()),
+            Err(_) => None,
         };
 
-        let Some(text) = text else { return false };
+        let Some(text) = text else { return Ok(false) };
         let items = plan::parse_plan_generation_response(&text);
         if items.is_empty() {
-            return false;
+            return Ok(false);
         }
 
         if let Ok(mut plan) = self.plan.lock() {
@@ -407,10 +444,10 @@ impl Agent {
                 plan.add_item(item);
             }
         }
-        true
+        Ok(true)
     }
 
-    fn note_planning_block(&mut self, instruction: &str) -> Result<()> {
+    fn note_planning_block(&mut self, ctx: &ExecutionContext, instruction: &str) -> Result<()> {
         if !self.planning_gate_active || self.plan_exists() {
             self.planning_block_count = 0;
             return Ok(());
@@ -418,7 +455,7 @@ impl Agent {
 
         self.planning_block_count += 1;
         if self.planning_block_count >= MAX_PLANNING_BLOCKS_BEFORE_FAILURE {
-            self.generate_or_fallback_plan(instruction);
+            self.generate_or_fallback_plan(instruction, ctx.cancel_token())?;
         }
 
         Ok(())
@@ -550,7 +587,7 @@ impl Agent {
         if let Some(block) = self.run_preflight(ctx, &name, &args, bash_args, None) {
             self.record_tool_result(id, name, args, block.message);
             if block.is_planning_block {
-                self.note_planning_block(instruction)?;
+                self.note_planning_block(ctx, instruction)?;
             }
             return Ok(());
         }
@@ -660,7 +697,7 @@ impl Agent {
         if let Some(block) = self.run_preflight(ctx, &name, &args, None, Some(external_effect)) {
             self.record_tool_result(id, name, args, block.message);
             if block.is_planning_block {
-                self.note_planning_block(instruction)?;
+                self.note_planning_block(ctx, instruction)?;
             }
             return Ok(());
         }
@@ -1187,7 +1224,7 @@ impl Agent {
 
     fn run_inner(&mut self, ctx: &ExecutionContext, instruction: &str) -> Result<String> {
         self.check_cancelled(ctx)?;
-        self.reset_run_state(&ctx.workspace_root, instruction);
+        self.reset_run_state(ctx, instruction)?;
         self.reload_workspace_tools(&ctx.workspace_root)?;
         self.emit_progress(self.current_working_progress());
 
@@ -1215,7 +1252,7 @@ impl Agent {
             if self.planning_gate_active && !self.plan_exists() {
                 planning_phase_steps += 1;
                 if planning_phase_steps >= MAX_PLANNING_PHASE_STEPS {
-                    self.generate_or_fallback_plan(instruction);
+                    self.generate_or_fallback_plan(instruction, ctx.cancel_token())?;
                     self.emit_progress(self.current_working_progress());
                 }
             }
@@ -1284,7 +1321,7 @@ impl Agent {
                             planning_redirects += 1;
                             if planning_redirects >= MAX_PLANNING_REDIRECTS {
                                 // Model repeatedly refused to plan — generate one.
-                                self.generate_or_fallback_plan(instruction);
+                                self.generate_or_fallback_plan(instruction, ctx.cancel_token())?;
                                 self.emit_progress(self.current_working_progress());
                             }
                             self.redirect_to_planning(msg, PLANNING_REDIRECT_MSG);
@@ -1346,16 +1383,17 @@ impl Agent {
         self.provider.set_tool_specs(tool_specs);
     }
 
-    fn reset_run_state(&mut self, workspace_root: &Path, instruction: &str) {
+    fn reset_run_state(&mut self, ctx: &ExecutionContext, instruction: &str) -> Result<()> {
+        let workspace_root = &ctx.workspace_root;
         self.changed_files.borrow_mut().clear();
         self.bash_history.borrow_mut().clear();
         *self.external_tool_ran.borrow_mut() = false;
         self.capture_run_baseline(workspace_root);
 
         self.planning_required_for_task =
-            self.options.require_plan && self.classify_task(instruction);
+            self.options.require_plan && self.classify_task(instruction, ctx.cancel_token())?;
         self.task_mode = if self.planning_required_for_task {
-            self.classify_task_mode(instruction)
+            self.classify_task_mode(instruction, ctx.cancel_token())?
         } else {
             plan::TaskMode::PlanAndExecute
         };
@@ -1363,6 +1401,7 @@ impl Agent {
         self.planning_escalated = false;
         self.planning_block_count = 0;
         self.execution_stage = ExecutionStage::Research;
+        Ok(())
     }
 
     fn build_run_system_prompt(&self, ctx: &ExecutionContext) -> Result<String> {
