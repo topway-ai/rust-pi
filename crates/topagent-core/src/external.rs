@@ -2,6 +2,7 @@ use crate::context::ToolContext;
 use crate::tool_spec::ToolSpec;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::process::Command;
 
@@ -29,6 +30,19 @@ pub struct ExternalToolConfig {
     pub argv_template: Option<Vec<String>>,
     #[serde(default)]
     pub effect: ExternalToolEffect,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawExternalToolConfig {
+    name: String,
+    description: String,
+    command: String,
+    #[serde(default)]
+    argv_template: Option<Vec<String>>,
+    #[serde(default)]
+    args_template: Option<String>,
+    #[serde(default)]
+    effect: ExternalToolEffect,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +106,20 @@ impl ExternalTool {
         self.config.effect
     }
 
+    fn from_config(config: ExternalToolConfig) -> Result<Self> {
+        let argv_template = config.argv_template.clone().ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "external tool '{}' is missing argv_template",
+                config.name
+            ))
+        })?;
+
+        Ok(Self {
+            input_schema: build_input_schema_from_argv_template(&argv_template),
+            config,
+        })
+    }
+
     pub fn execute(
         &self,
         args: &serde_json::Value,
@@ -104,16 +132,7 @@ impl ExternalTool {
             ))
         })?;
 
-        let placeholders: Vec<&str> = argv_template
-            .iter()
-            .filter_map(|p| {
-                if p.starts_with('{') && p.ends_with('}') {
-                    Some(&p[1..p.len() - 1])
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let placeholders = placeholder_names(argv_template);
 
         if let Some(obj) = args.as_object() {
             for key in obj.keys() {
@@ -213,11 +232,15 @@ impl ExternalToolRegistry {
     }
 
     pub fn names(&self) -> Vec<&str> {
-        self.tools.keys().map(|s| s.as_str()).collect()
+        let mut names: Vec<_> = self.tools.keys().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        names
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.tools.values().map(|t| t.spec()).collect()
+        let mut specs: Vec<_> = self.tools.values().map(|t| t.spec()).collect();
+        specs.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        specs
     }
 
     pub fn is_empty(&self) -> bool {
@@ -225,18 +248,11 @@ impl ExternalToolRegistry {
     }
 
     pub fn load_from_str(&mut self, content: &str) -> Result<()> {
-        let configs: Vec<ExternalToolConfig> = serde_json::from_str(content).map_err(|e| {
+        let configs: Vec<RawExternalToolConfig> = serde_json::from_str(content).map_err(|e| {
             Error::InvalidInput(format!("failed to parse external tools JSON: {}", e))
         })?;
         for config in configs {
-            let tool = ExternalTool {
-                config,
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }),
-            };
+            let tool = ExternalTool::from_config(config.into_external_tool_config()?)?;
             self.register(tool);
         }
         Ok(())
@@ -247,6 +263,68 @@ impl Default for ExternalToolRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl RawExternalToolConfig {
+    fn into_external_tool_config(self) -> Result<ExternalToolConfig> {
+        let argv_template = match (self.argv_template, self.args_template) {
+            (Some(argv_template), _) => Some(argv_template),
+            (None, Some(args_template)) => {
+                let parsed = shlex::split(&args_template).ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "failed to parse legacy args_template for external tool '{}'",
+                        self.name
+                    ))
+                })?;
+                Some(parsed)
+            }
+            (None, None) => None,
+        };
+
+        Ok(ExternalToolConfig {
+            name: self.name,
+            description: self.description,
+            command: self.command,
+            argv_template,
+            effect: self.effect,
+        })
+    }
+}
+
+fn placeholder_names(argv_template: &[String]) -> Vec<&str> {
+    argv_template
+        .iter()
+        .filter_map(|part| {
+            if part.starts_with('{') && part.ends_with('}') {
+                Some(&part[1..part.len() - 1])
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn build_input_schema_from_argv_template(argv_template: &[String]) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    let mut required = BTreeSet::new();
+
+    for placeholder in placeholder_names(argv_template) {
+        properties
+            .entry(placeholder.to_string())
+            .or_insert_with(|| {
+                serde_json::json!({
+                    "type": "string",
+                    "description": format!("value for {{{}}}", placeholder)
+                })
+            });
+        required.insert(placeholder.to_string());
+    }
+
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required.into_iter().collect::<Vec<_>>()
+    })
 }
 
 #[cfg(test)]
@@ -409,7 +487,7 @@ mod tests {
         let mut registry = ExternalToolRegistry::new();
         let json = r#"[
             {"name": "tool1", "description": "first tool", "command": "echo", "argv_template": []},
-            {"name": "tool2", "description": "second tool", "command": "ls", "argv_template": ["-la"], "effect": "execution_started"}
+            {"name": "tool2", "description": "second tool", "command": "ls", "argv_template": ["{path}", "-la"], "effect": "execution_started"}
         ]"#;
         registry.load_from_str(json).unwrap();
 
@@ -423,6 +501,40 @@ mod tests {
             registry.get("tool2").unwrap().effect(),
             ExternalToolEffect::ExecutionStarted
         );
+        let specs = registry.specs();
+        assert_eq!(specs[0].name, "tool1");
+        assert_eq!(specs[1].name, "tool2");
+        assert_eq!(
+            specs[1].input_schema["required"],
+            serde_json::json!(["path"])
+        );
+    }
+
+    #[test]
+    fn test_external_tool_registry_supports_legacy_args_template() {
+        let mut registry = ExternalToolRegistry::new();
+        let json = r#"[
+            {"name": "legacy", "description": "legacy tool", "command": "echo", "args_template": "hello {name}"}
+        ]"#;
+
+        registry.load_from_str(json).unwrap();
+
+        let tool = registry.get("legacy").unwrap();
+        assert_eq!(
+            tool.spec().input_schema["required"],
+            serde_json::json!(["name"])
+        );
+    }
+
+    #[test]
+    fn test_external_tool_registry_rejects_missing_argv_template() {
+        let mut registry = ExternalToolRegistry::new();
+        let json = r#"[
+            {"name": "broken", "description": "broken tool", "command": "echo"}
+        ]"#;
+
+        let err = registry.load_from_str(json).unwrap_err();
+        assert!(err.to_string().contains("missing argv_template"));
     }
 
     #[test]
