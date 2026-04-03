@@ -102,7 +102,15 @@ pub(crate) fn run_install(params: CliParams) -> Result<()> {
         api_key,
         route: build_route(params.provider, params.model)?,
         workspace,
-        options: build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs),
+        options: build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs)
+            .with_generated_tool_authoring(resolve_generated_tool_authoring(
+                params.generated_tool_authoring,
+                parse_env_bool(
+                    existing_values
+                        .get(TOPAGENT_TOOL_AUTHORING_KEY)
+                        .map(String::as_str),
+                ),
+            )),
     };
     install_service_with_config(&config, &paths)?;
 
@@ -296,8 +304,17 @@ pub(crate) fn service_paths() -> Result<ServicePaths> {
 // ── Service lifecycle ──
 
 fn run_service_install(token: Option<String>, params: CliParams) -> Result<()> {
-    let config = resolve_telegram_mode_config(token, params)?;
     let paths = service_paths()?;
+    let existing_values = read_managed_env_metadata(&paths.env_path).unwrap_or_default();
+    let config = resolve_telegram_mode_config(
+        token,
+        params,
+        parse_env_bool(
+            existing_values
+                .get(TOPAGENT_TOOL_AUTHORING_KEY)
+                .map(String::as_str),
+        ),
+    )?;
     install_service_with_config(&config, &paths)?;
     print_service_installed(
         "TopAgent service installed.",
@@ -451,6 +468,13 @@ fn render_status() -> Result<()> {
             .map(String::as_str)
             .unwrap_or("(default)");
         println!("Route: {} | {}", provider, model);
+    }
+    if let Some(enabled) = parse_env_bool(
+        env_values
+            .get(TOPAGENT_TOOL_AUTHORING_KEY)
+            .map(String::as_str),
+    ) {
+        println!("Tool authoring: {}", if enabled { "on" } else { "off" });
     }
 
     if service_installed {
@@ -697,6 +721,12 @@ fn render_service_exec_start(current_exe: &Path, config: &TelegramModeConfig) ->
         config.options.max_provider_retries.to_string(),
         "--timeout-secs".to_string(),
         config.options.provider_timeout_secs.to_string(),
+        "--tool-authoring".to_string(),
+        if config.options.enable_generated_tool_authoring {
+            "on".to_string()
+        } else {
+            "off".to_string()
+        },
         "telegram".to_string(),
     ];
     args.iter_mut().for_each(|arg| {
@@ -734,6 +764,7 @@ fn render_service_env_file(config: &TelegramModeConfig) -> Result<String> {
 {workspace_key}={workspace}
 {provider_key}={provider}
 {model_key}={model}
+{tool_authoring_key}={tool_authoring}
 ",
         header = TOPAGENT_MANAGED_HEADER,
         managed_key = TOPAGENT_SERVICE_MANAGED_KEY,
@@ -745,6 +776,12 @@ fn render_service_env_file(config: &TelegramModeConfig) -> Result<String> {
         provider = quote_env_value(config.route.provider_id.as_str()),
         model_key = TOPAGENT_MODEL_KEY,
         model = quote_env_value(&config.route.model_id),
+        tool_authoring_key = TOPAGENT_TOOL_AUTHORING_KEY,
+        tool_authoring = quote_env_value(if config.options.enable_generated_tool_authoring {
+            "1"
+        } else {
+            "0"
+        }),
         api_key_key = OPENROUTER_API_KEY_KEY,
         token_key = TELEGRAM_BOT_TOKEN_KEY,
     ))

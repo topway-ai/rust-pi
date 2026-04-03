@@ -67,9 +67,9 @@ CLI parses args
   -> resolve workspace, API key, model route
   -> build workspace memory briefing from .topagent/MEMORY.md + relevant topic files
   -> create ExecutionContext with workspace + cancel token + memory briefing
+  -> read explicit tool-authoring mode from CLI/service config
   -> create Agent with provider + tools + options
   -> agent.run(ctx, instruction)
-     -> classify tool-authoring intent for this task
      -> load TOPAGENT.md, workspace external tools, generated tools, generated-tool warnings
      -> build system prompt (+ project instructions + workspace memory briefing + generated-tool warnings)
      -> classify task complexity -> activate planning gate if non-trivial
@@ -97,6 +97,7 @@ CLI parses args
         - /start, /help -> reply with config summary
         - /stop -> cancel running task for that chat
         - /reset -> clear persisted transcript for that chat
+        - /tool_authoring on|off -> persist generated-tool authoring mode for that chat
         - text -> start_message:
           a. load `.topagent/MEMORY.md` (always)
           b. load matching `.topagent/topics/*.md` files only if relevant

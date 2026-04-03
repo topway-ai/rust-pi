@@ -76,7 +76,6 @@ pub struct Agent {
     run_baseline: RefCell<Option<RunBaseline>>,
     progress_callback: Option<ProgressCallback>,
     planning_block_count: usize,
-    generated_tool_authoring_enabled: bool,
     generated_tool_warnings: Vec<String>,
 }
 
@@ -149,10 +148,12 @@ impl Agent {
 
         registry.add(Box::new(SaveLessonTool::new()));
 
-        registry.add(Box::new(CreateToolTool::new()));
-        registry.add(Box::new(RepairToolTool::new()));
-        registry.add(Box::new(ListGeneratedToolsTool::new()));
-        registry.add(Box::new(DeleteGeneratedToolTool::new()));
+        if options.enable_generated_tool_authoring {
+            registry.add(Box::new(CreateToolTool::new()));
+            registry.add(Box::new(RepairToolTool::new()));
+            registry.add(Box::new(ListGeneratedToolsTool::new()));
+            registry.add(Box::new(DeleteGeneratedToolTool::new()));
+        }
 
         Self {
             session: Session::new(),
@@ -174,7 +175,6 @@ impl Agent {
             run_baseline: RefCell::new(None),
             progress_callback: None,
             planning_block_count: 0,
-            generated_tool_authoring_enabled: false,
             generated_tool_warnings: Vec::new(),
         }
     }
@@ -485,13 +485,6 @@ impl Agent {
         bash_args: Option<&serde_json::Value>,
         external_effect: Option<ExternalToolEffect>,
     ) -> Option<PreflightBlock> {
-        if Self::is_generated_tool_authoring_tool(name) && !self.generated_tool_authoring_enabled {
-            return Some(PreflightBlock {
-                message: "tool authoring is disabled for this task; ask explicitly if you want to create, repair, list, or delete workspace tools".to_string(),
-                is_planning_block: false,
-            });
-        }
-
         let tool_ctx = ToolContext::new(ctx, &self.options);
         if let Some(hooks) = self.hooks.get(name) {
             if !hooks.run_pre_hooks(name, args, &tool_ctx) {
@@ -1348,7 +1341,7 @@ impl Agent {
     }
 
     fn sync_provider_tools(&mut self) {
-        let mut tool_specs = self.visible_internal_tool_specs();
+        let mut tool_specs = self.tools.specs();
         tool_specs.extend(self.external_tools.specs());
         self.provider.set_tool_specs(tool_specs);
     }
@@ -1358,8 +1351,6 @@ impl Agent {
         self.bash_history.borrow_mut().clear();
         *self.external_tool_ran.borrow_mut() = false;
         self.capture_run_baseline(workspace_root);
-        self.generated_tool_authoring_enabled =
-            Self::should_expose_generated_tool_authoring(instruction);
 
         self.planning_required_for_task =
             self.options.require_plan && self.classify_task(instruction);
@@ -1375,10 +1366,8 @@ impl Agent {
     }
 
     fn build_run_system_prompt(&self, ctx: &ExecutionContext) -> Result<String> {
-        let mut system_prompt = prompt::build_system_prompt(
-            &self.visible_internal_tool_specs(),
-            &self.external_tools.specs(),
-        );
+        let mut system_prompt =
+            prompt::build_system_prompt(&self.tools.specs(), &self.external_tools.specs());
 
         match get_project_instructions_or_error(&ctx.workspace_root)? {
             Some(project_instructions) => {
@@ -1433,61 +1422,6 @@ impl Agent {
             tool_name,
             "create_tool" | "repair_tool" | "delete_generated_tool"
         )
-    }
-
-    fn is_generated_tool_authoring_tool(tool_name: &str) -> bool {
-        matches!(
-            tool_name,
-            "create_tool" | "repair_tool" | "list_generated_tools" | "delete_generated_tool"
-        )
-    }
-
-    fn visible_internal_tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools
-            .specs()
-            .into_iter()
-            .filter(|spec| {
-                self.generated_tool_authoring_enabled
-                    || !Self::is_generated_tool_authoring_tool(&spec.name)
-            })
-            .collect()
-    }
-
-    fn should_expose_generated_tool_authoring(instruction: &str) -> bool {
-        let lower = instruction.to_ascii_lowercase();
-
-        let direct_phrases = [
-            "create_tool",
-            "repair_tool",
-            "delete_generated_tool",
-            "list_generated_tools",
-            "generated tool",
-            "custom tool",
-            "workspace tool",
-            ".topagent/tools",
-            "tool genesis",
-        ];
-        if direct_phrases.iter().any(|phrase| lower.contains(phrase)) {
-            return true;
-        }
-
-        let mentions_tool_noun = [
-            " tool",
-            "tools",
-            "helper script",
-            "script helper",
-            "workspace helper",
-        ]
-        .iter()
-        .any(|needle| lower.contains(needle));
-        let mentions_tool_action = [
-            "create", "make", "build", "generate", "repair", "fix", "delete", "remove", "list",
-            "show",
-        ]
-        .iter()
-        .any(|verb| lower.contains(verb));
-
-        mentions_tool_noun && mentions_tool_action
     }
 
     fn generated_tool_warning_lines(&self) -> &[String] {

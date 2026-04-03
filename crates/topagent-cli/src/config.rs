@@ -8,6 +8,7 @@ use topagent_core::{
 pub(crate) const TELEGRAM_SERVICE_UNIT_NAME: &str = "topagent-telegram.service";
 pub(crate) const TOPAGENT_SERVICE_MANAGED_KEY: &str = "TOPAGENT_SERVICE_MANAGED";
 pub(crate) const TOPAGENT_WORKSPACE_KEY: &str = "TOPAGENT_WORKSPACE";
+pub(crate) const TOPAGENT_TOOL_AUTHORING_KEY: &str = "TOPAGENT_TOOL_AUTHORING";
 
 /// Shared CLI parameters threaded through install, service, telegram, and one-shot paths.
 #[derive(Debug, Clone)]
@@ -19,6 +20,7 @@ pub(crate) struct CliParams {
     pub max_steps: Option<usize>,
     pub max_retries: Option<usize>,
     pub timeout_secs: Option<u64>,
+    pub generated_tool_authoring: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +41,35 @@ pub(crate) fn build_runtime_options(
         .with_max_steps(max_steps.unwrap_or(50))
         .with_max_provider_retries(max_retries.unwrap_or(3))
         .with_provider_timeout_secs(timeout_secs.unwrap_or(120))
+}
+
+pub(crate) fn resolve_generated_tool_authoring(
+    requested: Option<bool>,
+    persisted: Option<bool>,
+) -> bool {
+    requested.or(persisted).unwrap_or(false)
+}
+
+pub(crate) fn parse_env_bool(value: Option<&str>) -> Option<bool> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value)
+            if value.eq_ignore_ascii_case("1")
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on") =>
+        {
+            Some(true)
+        }
+        Some(value)
+            if value.eq_ignore_ascii_case("0")
+                || value.eq_ignore_ascii_case("false")
+                || value.eq_ignore_ascii_case("no")
+                || value.eq_ignore_ascii_case("off") =>
+        {
+            Some(false)
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn resolve_workspace_path(workspace: Option<PathBuf>) -> Result<PathBuf> {
@@ -127,13 +158,18 @@ pub(crate) fn build_route(provider: String, model: Option<String>) -> Result<Mod
 pub(crate) fn resolve_telegram_mode_config(
     token: Option<String>,
     params: CliParams,
+    persisted_generated_tool_authoring: Option<bool>,
 ) -> Result<TelegramModeConfig> {
     Ok(TelegramModeConfig {
         token: require_telegram_token(token)?,
         api_key: require_openrouter_api_key(params.api_key)?,
         route: build_route(params.provider, params.model)?,
         workspace: resolve_workspace_path(params.workspace)?,
-        options: build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs),
+        options: build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs)
+            .with_generated_tool_authoring(resolve_generated_tool_authoring(
+                params.generated_tool_authoring,
+                persisted_generated_tool_authoring,
+            )),
     })
 }
 
@@ -188,5 +224,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, override_dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_generated_tool_authoring_prefers_requested_value() {
+        assert!(!resolve_generated_tool_authoring(Some(false), Some(true)));
+        assert!(resolve_generated_tool_authoring(Some(true), Some(false)));
+    }
+
+    #[test]
+    fn test_resolve_generated_tool_authoring_falls_back_to_persisted_value() {
+        assert!(resolve_generated_tool_authoring(None, Some(true)));
+        assert!(!resolve_generated_tool_authoring(None, Some(false)));
+        assert!(!resolve_generated_tool_authoring(None, None));
+    }
+
+    #[test]
+    fn test_parse_env_bool_accepts_common_truthy_and_falsey_values() {
+        assert_eq!(parse_env_bool(Some("1")), Some(true));
+        assert_eq!(parse_env_bool(Some("true")), Some(true));
+        assert_eq!(parse_env_bool(Some("on")), Some(true));
+        assert_eq!(parse_env_bool(Some("0")), Some(false));
+        assert_eq!(parse_env_bool(Some("false")), Some(false));
+        assert_eq!(parse_env_bool(Some("off")), Some(false));
+        assert_eq!(parse_env_bool(Some("unknown")), None);
+        assert_eq!(parse_env_bool(None), None);
     }
 }

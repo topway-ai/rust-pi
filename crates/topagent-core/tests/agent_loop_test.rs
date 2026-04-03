@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use tempfile::TempDir;
 use topagent_core::{
     context::ExecutionContext,
+    tool_genesis::{ToolGenesis, VerificationSpec},
     tools::{BashTool, EditTool, GitDiffTool, ReadTool, Tool, WriteTool},
     Agent, CancellationToken, Content, Error, ExecutionStage, Message, ModelRoute, ProgressKind,
     ProgressUpdate, Provider, ProviderResponse, Role, RuntimeOptions, TaskResult, ToolCallEntry,
@@ -659,7 +661,8 @@ fn test_repeated_runs_do_not_duplicate_genesis_tools() {
         }
     }
 
-    let mut agent = Agent::new(Box::new(TestProvider), make_tools());
+    let options = RuntimeOptions::default().with_generated_tool_authoring(true);
+    let mut agent = Agent::with_options(Box::new(TestProvider), make_tools(), options);
 
     let specs_first_run = agent.tool_specs();
 
@@ -683,7 +686,7 @@ fn test_repeated_runs_do_not_duplicate_genesis_tools() {
     let tool_names: Vec<&str> = specs_first_run.iter().map(|s| s.name.as_str()).collect();
     assert!(
         tool_names.contains(&"create_tool"),
-        "create_tool should be registered"
+        "create_tool should be registered when authoring is enabled"
     );
     assert!(
         tool_names.contains(&"repair_tool"),
@@ -703,22 +706,21 @@ fn test_repeated_runs_do_not_duplicate_genesis_tools() {
 fn test_genesis_tools_become_external_after_verification() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".topagent/tools/my_tool")).unwrap();
-    std::fs::write(root.join(".topagent/tools/my_tool/script.sh"), "echo hello").unwrap();
-    std::fs::write(
-        root.join(".topagent/tools/my_tool/manifest.json"),
-        serde_json::json!({
-            "name": "my_tool",
-            "description": "a verified tool",
-            "command": "echo hello",
-            "verified": true,
-            "inputs": [],
-            "argv_template": [],
-            "manifest_version": 1
-        })
-        .to_string(),
-    )
-    .unwrap();
+    let genesis = ToolGenesis::new(root.clone());
+    genesis
+        .create_tool(
+            "my_tool",
+            "a verified tool",
+            "echo hello",
+            vec![],
+            vec![],
+            Some(VerificationSpec {
+                verification_inputs: BTreeMap::new(),
+                expected_exit: 0,
+                expected_output_contains: Some("hello".to_string()),
+            }),
+        )
+        .unwrap();
 
     let ctx = ExecutionContext::new(root);
 
@@ -755,10 +757,10 @@ fn test_generated_tool_is_usable_without_waiting_for_next_run() {
                 "description": "echo a greeting",
                 "script": "printf 'hello %s\\n' \"$1\"",
                 "inputs": [
-                    {"name": "name", "description": "name to greet", "required": true}
+                    {"name": "name", "description": "name to greet"}
                 ],
                 "argv_template": ["{name}"],
-                "verification_args": ["world"],
+                "verification_inputs": {"name": "world"},
                 "expected_output_contains": "hello world"
             }),
         },
@@ -770,7 +772,8 @@ fn test_generated_tool_is_usable_without_waiting_for_next_run() {
         ProviderResponse::Message(Message::assistant("done".to_string())),
     ];
     let provider = topagent_core::ScriptedProvider::new(responses);
-    let mut agent = Agent::new(Box::new(provider), make_tools());
+    let options = RuntimeOptions::default().with_generated_tool_authoring(true);
+    let mut agent = Agent::with_options(Box::new(provider), make_tools(), options);
 
     let result = agent.run(&ctx, "create a helper tool and use it immediately");
     assert!(result.is_ok());
@@ -1087,21 +1090,22 @@ fn test_workspace_memory_context_is_included_in_system_prompt() {
 fn test_generated_tool_warnings_are_included_in_system_prompt() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().to_path_buf();
-    let tool_dir = root.join(".topagent/tools/broken_tool");
-    std::fs::create_dir_all(&tool_dir).unwrap();
-    std::fs::write(
-        tool_dir.join("manifest.json"),
-        serde_json::json!({
-            "name": "broken_tool",
-            "description": "broken generated tool",
-            "verified": true,
-            "inputs": [],
-            "argv_template": [],
-            "manifest_version": 1
-        })
-        .to_string(),
-    )
-    .unwrap();
+    let genesis = ToolGenesis::new(root.clone());
+    genesis
+        .create_tool(
+            "broken_tool",
+            "broken generated tool",
+            "echo ok",
+            vec![],
+            vec![],
+            Some(VerificationSpec {
+                verification_inputs: BTreeMap::new(),
+                expected_exit: 0,
+                expected_output_contains: Some("ok".to_string()),
+            }),
+        )
+        .unwrap();
+    std::fs::remove_file(root.join(".topagent/tools/broken_tool/script.sh")).unwrap();
     let ctx = ExecutionContext::new(root);
 
     struct CheckPromptProvider {
@@ -1898,21 +1902,22 @@ fn test_read_only_task_no_file_change_evidence() {
 fn test_generated_tool_warnings_appear_in_final_output() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().to_path_buf();
-    let tool_dir = root.join(".topagent/tools/broken_tool");
-    std::fs::create_dir_all(&tool_dir).unwrap();
-    std::fs::write(
-        tool_dir.join("manifest.json"),
-        serde_json::json!({
-            "name": "broken_tool",
-            "description": "broken generated tool",
-            "verified": true,
-            "inputs": [],
-            "argv_template": [],
-            "manifest_version": 1
-        })
-        .to_string(),
-    )
-    .unwrap();
+    let genesis = ToolGenesis::new(root.clone());
+    genesis
+        .create_tool(
+            "broken_tool",
+            "broken generated tool",
+            "echo ok",
+            vec![],
+            vec![],
+            Some(VerificationSpec {
+                verification_inputs: BTreeMap::new(),
+                expected_exit: 0,
+                expected_output_contains: Some("ok".to_string()),
+            }),
+        )
+        .unwrap();
+    std::fs::remove_file(root.join(".topagent/tools/broken_tool/script.sh")).unwrap();
     let ctx = ExecutionContext::new(root);
 
     let provider = topagent_core::ScriptedProvider::new(vec![ProviderResponse::Message(
@@ -2330,21 +2335,19 @@ fn test_agent_syncs_internal_and_external_tools_to_provider() {
 }
 
 #[test]
-fn test_agent_exposes_tool_authoring_tools_for_explicit_tool_task() {
+fn test_agent_exposes_tool_authoring_tools_when_runtime_option_enabled() {
     let (ctx, _temp) = make_test_context();
     let provider = RecordingProvider::new(ProviderResponse::Message(Message::assistant("done")));
     let tool_names = provider.tool_names_handle();
+    let options = RuntimeOptions::default().with_generated_tool_authoring(true);
     let mut agent = Agent::with_route(
         Box::new(provider),
         ModelRoute::default(),
         make_tools(),
-        RuntimeOptions::default(),
+        options,
     );
 
-    let result = agent.run(
-        &ctx,
-        "create a custom workspace tool that summarizes a file",
-    );
+    let result = agent.run(&ctx, "inspect the repository");
     assert!(result.is_ok());
 
     let tool_names = tool_names.read().unwrap().clone();
@@ -2355,35 +2358,20 @@ fn test_agent_exposes_tool_authoring_tools_for_explicit_tool_task() {
 }
 
 #[test]
-fn test_tool_authoring_call_is_blocked_when_task_does_not_request_it() {
+fn test_tool_authoring_tools_are_not_registered_when_runtime_option_disabled() {
     let (ctx, _temp) = make_test_context();
-    let responses = vec![
-        ProviderResponse::ToolCall {
-            id: "1".into(),
-            name: "create_tool".into(),
-            args: serde_json::json!({
-                "name": "hidden_tool",
-                "description": "should not run",
-                "script": "echo ok",
-                "verification_args": []
-            }),
-        },
-        ProviderResponse::Message(Message::assistant("done".to_string())),
-    ];
-    let provider = topagent_core::ScriptedProvider::new(responses);
+    let provider = RecordingProvider::new(ProviderResponse::Message(Message::assistant("done")));
+    let tool_names = provider.tool_names_handle();
     let mut agent = Agent::new(Box::new(provider), make_tools());
 
     let result = agent.run(&ctx, "inspect the repository");
     assert!(result.is_ok());
 
-    let messages = agent.conversation_messages();
-    assert!(messages.iter().any(|message| {
-        matches!(
-            &message.content,
-            Content::ToolResult { result, .. }
-                if result.contains("tool authoring is disabled for this task")
-        )
-    }));
+    let tool_names = tool_names.read().unwrap().clone();
+    assert!(!tool_names.contains(&"create_tool".to_string()));
+    assert!(!tool_names.contains(&"repair_tool".to_string()));
+    assert!(!tool_names.contains(&"list_generated_tools".to_string()));
+    assert!(!tool_names.contains(&"delete_generated_tool".to_string()));
 }
 
 #[test]

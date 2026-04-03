@@ -72,7 +72,7 @@ The agent runs up to 50 steps by default (configurable with `--max-steps`). If i
 | `save_plan` | Archive a plan to `.topagent/plans/` |
 | `save_lesson` | Save a lesson note to `.topagent/lessons/` |
 
-Custom tools are stored in `.topagent/tools/`. Tool-authoring tools are only exposed when the task is explicitly about creating, repairing, listing, or deleting workspace tools. Broken generated tools are reported as workspace warnings.
+Custom tools are stored in `.topagent/tools/`. Tool-authoring tools are only exposed when the operator enables them with `--tool-authoring on` or, in Telegram, with `/tool_authoring on`. Broken generated tools are reported as workspace warnings.
 
 ## Current limitations
 

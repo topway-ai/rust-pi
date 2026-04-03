@@ -300,6 +300,28 @@ fn test_install_reuses_existing_config_when_prompt_is_left_blank() {
 }
 
 #[test]
+fn test_install_persists_explicit_tool_authoring_mode() {
+    let harness = ServiceHarness::new();
+    harness
+        .command()
+        .args(["--tool-authoring", "on", "install"])
+        .write_stdin("test-openrouter-key\n123456:abcdef\n")
+        .assert()
+        .success();
+
+    let unit = fs::read_to_string(harness.unit_path()).unwrap();
+    assert!(unit.contains("--tool-authoring on"));
+
+    let env = fs::read_to_string(harness.env_path()).unwrap();
+    assert!(env.contains("TOPAGENT_TOOL_AUTHORING=\"1\""));
+
+    let status = harness.command().arg("status").output().unwrap();
+    assert!(status.status.success());
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(stdout.contains("Tool authoring: on"));
+}
+
+#[test]
 fn test_status_reports_setup_and_service_health_after_install() {
     let harness = ServiceHarness::new();
     harness

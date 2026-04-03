@@ -8,6 +8,7 @@ pub struct RuntimeOptions {
     pub progress_heartbeat_secs: u64,
     pub max_messages_before_truncation: usize,
     pub require_plan: bool,
+    pub enable_generated_tool_authoring: bool,
     pub research_model: Option<String>,
     pub edit_model: Option<String>,
     pub review_model: Option<String>,
@@ -24,6 +25,7 @@ impl Default for RuntimeOptions {
             progress_heartbeat_secs: 10,
             max_messages_before_truncation: 100,
             require_plan: true,
+            enable_generated_tool_authoring: false,
             research_model: None,
             edit_model: None,
             review_model: None,
@@ -76,6 +78,11 @@ impl RuntimeOptions {
 
     pub fn with_require_plan(mut self, require_plan: bool) -> Self {
         self.require_plan = require_plan;
+        self
+    }
+
+    pub fn with_generated_tool_authoring(mut self, enable_generated_tool_authoring: bool) -> Self {
+        self.enable_generated_tool_authoring = enable_generated_tool_authoring;
         self
     }
 

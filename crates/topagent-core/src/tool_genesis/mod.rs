@@ -2,6 +2,7 @@ use crate::error::Error;
 use crate::external::{resolve_argv_template, ExternalTool};
 use crate::Result;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -13,12 +14,6 @@ const TOOLS_DIR: &str = ".topagent/tools";
 pub struct ToolInput {
     pub name: String,
     pub description: String,
-    #[serde(default = "default_true")]
-    pub required: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,13 +28,14 @@ pub struct ToolManifest {
     pub argv_template: Vec<String>,
     #[serde(default)]
     pub manifest_version: Option<u32>,
+    #[serde(default)]
+    pub script_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VerificationSpec {
     #[serde(default)]
     pub verification_inputs: BTreeMap<String, String>,
-    pub verification_args: Vec<String>,
     #[serde(default)]
     pub expected_exit: i32,
     #[serde(default)]
@@ -101,6 +97,7 @@ impl ToolGenesis {
             inputs,
             argv_template,
             manifest_version: Some(1),
+            script_sha256: Some(script_sha256_hex(command.as_bytes())),
         };
         validate_manifest_interface(&manifest)?;
         if let Some(spec) = verification.as_ref() {
@@ -186,6 +183,7 @@ impl ToolGenesis {
         }
         manifest.verified = false;
         manifest.manifest_version = Some(1);
+        manifest.script_sha256 = Some(script_sha256_hex(new_command.as_bytes()));
         validate_manifest_interface(&manifest)?;
         if let Some(spec) = manifest.verification.as_ref() {
             validate_verification_spec(&manifest, spec)?;
@@ -383,6 +381,21 @@ impl ToolGenesis {
             Some(format!("invalid interface: {}", err))
         } else if !script_path.exists() {
             Some("missing script.sh".to_string())
+        } else if manifest.verified {
+            match manifest.script_sha256.as_deref() {
+                None | Some("") => Some(
+                    "missing script_sha256; repair or recreate the tool to make it usable"
+                        .to_string(),
+                ),
+                Some(expected_hash) => match script_sha256_for_path(&script_path) {
+                    Ok(current_hash) if current_hash == expected_hash => None,
+                    Ok(_) => Some(
+                        "script.sh changed after verification; repair or recreate the tool"
+                            .to_string(),
+                    ),
+                    Err(err) => Some(format!("failed to hash script.sh: {}", err)),
+                },
+            }
         } else {
             None
         };
@@ -496,84 +509,52 @@ fn validate_manifest_interface(manifest: &ToolManifest) -> Result<()> {
     Ok(())
 }
 
+fn script_sha256_hex(contents: &[u8]) -> String {
+    let digest = Sha256::digest(contents);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut encoded, "{:02x}", byte);
+    }
+    encoded
+}
+
+fn script_sha256_for_path(path: &Path) -> std::io::Result<String> {
+    let contents = std::fs::read(path)?;
+    Ok(script_sha256_hex(&contents))
+}
+
 fn validate_verification_spec(manifest: &ToolManifest, spec: &VerificationSpec) -> Result<()> {
-    let _ = verification_invocation_for_manifest(manifest, spec)?;
+    let _ = verification_payload_for_manifest(manifest, spec)?;
     Ok(())
 }
 
-enum VerificationInvocation {
-    RuntimePayload(serde_json::Value),
-    LegacyPositional(Vec<String>),
-}
-
-fn verification_invocation_for_manifest(
+fn verification_payload_for_manifest(
     manifest: &ToolManifest,
     spec: &VerificationSpec,
-) -> Result<VerificationInvocation> {
-    if !spec.verification_inputs.is_empty() {
-        let known_inputs: std::collections::HashSet<&str> = manifest
-            .inputs
-            .iter()
-            .map(|input| input.name.as_str())
-            .collect();
-        for key in spec.verification_inputs.keys() {
-            if !known_inputs.contains(key.as_str()) {
-                return Err(Error::InvalidInput(format!(
-                    "verification input '{}' does not match any declared tool input",
-                    key
-                )));
-            }
-        }
-
-        let payload = serde_json::Value::Object(
-            spec.verification_inputs
-                .iter()
-                .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
-                .collect(),
-        );
-        resolve_argv_template(&manifest.argv_template, &payload, &manifest.name)?;
-        return Ok(VerificationInvocation::RuntimePayload(payload));
-    }
-
-    if !manifest.inputs.is_empty() || !manifest.argv_template.is_empty() {
-        if manifest.inputs.is_empty() {
-            if !spec.verification_args.is_empty() {
-                return Err(Error::InvalidInput(format!(
-                    "tool '{}' has no declared inputs; verification_args cannot add extra runtime arguments",
-                    manifest.name
-                )));
-            }
-
-            let payload = serde_json::json!({});
-            resolve_argv_template(&manifest.argv_template, &payload, &manifest.name)?;
-            return Ok(VerificationInvocation::RuntimePayload(payload));
-        }
-
-        if spec.verification_args.len() != manifest.inputs.len() {
+) -> Result<serde_json::Value> {
+    let known_inputs: std::collections::HashSet<&str> = manifest
+        .inputs
+        .iter()
+        .map(|input| input.name.as_str())
+        .collect();
+    for key in spec.verification_inputs.keys() {
+        if !known_inputs.contains(key.as_str()) {
             return Err(Error::InvalidInput(format!(
-                "tool '{}' verification_args must provide exactly {} values to match declared inputs; use verification_inputs for named verification",
-                manifest.name,
-                manifest.inputs.len()
+                "verification input '{}' does not match any declared tool input",
+                key
             )));
         }
-
-        let payload = serde_json::Value::Object(
-            manifest
-                .inputs
-                .iter()
-                .zip(spec.verification_args.iter())
-                .map(|(input, value)| {
-                    (input.name.clone(), serde_json::Value::String(value.clone()))
-                })
-                .collect(),
-        );
-        resolve_argv_template(&manifest.argv_template, &payload, &manifest.name)?;
-        return Ok(VerificationInvocation::RuntimePayload(payload));
     }
 
-    Ok(VerificationInvocation::LegacyPositional(
-        spec.verification_args.clone(),
-    ))
+    let payload = serde_json::Value::Object(
+        spec.verification_inputs
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .collect(),
+    );
+    resolve_argv_template(&manifest.argv_template, &payload, &manifest.name)?;
+    Ok(payload)
 }
 
 fn verification_command_argv(
@@ -582,22 +563,17 @@ fn verification_command_argv(
     spec: &VerificationSpec,
 ) -> Result<Vec<String>> {
     let mut argv = vec![script_path.display().to_string()];
-    match verification_invocation_for_manifest(manifest, spec)? {
-        VerificationInvocation::RuntimePayload(payload) => {
-            argv.extend(resolve_argv_template(
-                &manifest.argv_template,
-                &payload,
-                &manifest.name,
-            )?);
-        }
-        VerificationInvocation::LegacyPositional(args) => argv.extend(args),
-    }
+    let payload = verification_payload_for_manifest(manifest, spec)?;
+    argv.extend(resolve_argv_template(
+        &manifest.argv_template,
+        &payload,
+        &manifest.name,
+    )?);
     Ok(argv)
 }
 
 fn build_input_schema(inputs: &[ToolInput]) -> serde_json::Value {
     let mut properties = serde_json::Map::new();
-    let mut required = Vec::new();
     for input in inputs {
         properties.insert(
             input.name.clone(),
@@ -606,10 +582,8 @@ fn build_input_schema(inputs: &[ToolInput]) -> serde_json::Value {
                 "description": input.description
             }),
         );
-        if input.required {
-            required.push(input.name.clone());
-        }
     }
+    let required: Vec<_> = inputs.iter().map(|input| input.name.clone()).collect();
     serde_json::json!({
         "type": "object",
         "properties": properties,
@@ -664,7 +638,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec!["hello".to_string()],
                     expected_exit: 0,
                     expected_output_contains: Some("hello".to_string()),
                 }),
@@ -694,7 +667,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: None,
                 }),
@@ -719,7 +691,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("one".to_string()),
                 }),
@@ -746,7 +717,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("ok".to_string()),
                 }),
@@ -777,8 +747,7 @@ mod tests {
         let bad_args = serde_json::json!({
             "name": "bad/name",
             "description": "test",
-            "script": "echo hi",
-            "verification_args": <Vec<String>>::new()
+            "script": "echo hi"
         });
 
         let result = tool.execute(bad_args, &ctx);
@@ -797,7 +766,6 @@ mod tests {
             None,
             Some(&VerificationSpec {
                 verification_inputs: BTreeMap::new(),
-                verification_args: vec![],
                 expected_exit: 0,
                 expected_output_contains: None,
             }),
@@ -836,12 +804,10 @@ mod tests {
             vec![ToolInput {
                 name: "msg".to_string(),
                 description: "message".to_string(),
-                required: true,
             }],
             vec!["{missing}".to_string()],
             Some(VerificationSpec {
                 verification_inputs: BTreeMap::from([("msg".to_string(), "ok".to_string())]),
-                verification_args: vec![],
                 expected_exit: 0,
                 expected_output_contains: Some("ok".to_string()),
             }),
@@ -874,7 +840,6 @@ mod tests {
                 vec![ToolInput {
                     name: "name".to_string(),
                     description: "name to greet".to_string(),
-                    required: true,
                 }],
                 vec!["{name}".to_string()],
                 Some(VerificationSpec {
@@ -882,7 +847,6 @@ mod tests {
                         "name".to_string(),
                         "world".to_string(),
                     )]),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("hello world".to_string()),
                 }),
@@ -907,7 +871,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: None,
                 }),
@@ -924,7 +887,6 @@ mod tests {
                 None,
                 Some(&VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("fixed".to_string()),
                 }),
@@ -950,7 +912,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("SCRIPT_OUTPUT".to_string()),
                 }),
@@ -978,7 +939,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("test".to_string()),
                 }),
@@ -1012,6 +972,88 @@ mod tests {
     }
 
     #[test]
+    fn test_verified_tool_without_script_hash_is_unavailable() {
+        let temp = TempDir::new().unwrap();
+        let genesis = ToolGenesis::new(temp.path().to_path_buf());
+
+        genesis
+            .create_tool(
+                "legacy_verified",
+                "legacy verified tool",
+                "echo ok",
+                vec![],
+                vec![],
+                Some(VerificationSpec {
+                    verification_inputs: BTreeMap::new(),
+                    expected_exit: 0,
+                    expected_output_contains: Some("ok".to_string()),
+                }),
+            )
+            .unwrap();
+
+        let manifest_path = temp
+            .path()
+            .join(".topagent/tools/legacy_verified/manifest.json");
+        let mut manifest: ToolManifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        manifest.script_sha256 = None;
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = genesis.load_verified_tools().unwrap();
+        assert!(loaded.is_empty());
+
+        let tools = genesis.list_generated_tools().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "legacy_verified");
+        assert_eq!(
+            tools[0].load_warning.as_deref(),
+            Some("missing script_sha256; repair or recreate the tool to make it usable")
+        );
+    }
+
+    #[test]
+    fn test_verified_tool_becomes_unavailable_if_script_changes_after_verification() {
+        let temp = TempDir::new().unwrap();
+        let genesis = ToolGenesis::new(temp.path().to_path_buf());
+
+        genesis
+            .create_tool(
+                "tampered_tool",
+                "tampered tool",
+                "echo original",
+                vec![],
+                vec![],
+                Some(VerificationSpec {
+                    verification_inputs: BTreeMap::new(),
+                    expected_exit: 0,
+                    expected_output_contains: Some("original".to_string()),
+                }),
+            )
+            .unwrap();
+
+        std::fs::write(
+            temp.path().join(".topagent/tools/tampered_tool/script.sh"),
+            "echo tampered",
+        )
+        .unwrap();
+
+        let loaded = genesis.load_verified_tools().unwrap();
+        assert!(loaded.is_empty());
+
+        let tools = genesis.list_generated_tools().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "tampered_tool");
+        assert_eq!(
+            tools[0].load_warning.as_deref(),
+            Some("script.sh changed after verification; repair or recreate the tool")
+        );
+    }
+
+    #[test]
     fn test_verification_fails_for_wrong_output() {
         let temp = TempDir::new().unwrap();
         let genesis = ToolGenesis::new(temp.path().to_path_buf());
@@ -1025,7 +1067,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("WRONG_OUTPUT".to_string()),
                 }),
@@ -1053,7 +1094,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: None,
                 }),
@@ -1068,7 +1108,6 @@ mod tests {
                 None,
                 Some(&VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: None,
                 }),
@@ -1120,12 +1159,10 @@ mod tests {
                 vec![ToolInput {
                     name: "msg".to_string(),
                     description: "message to echo".to_string(),
-                    required: true,
                 }],
                 vec!["{msg}".to_string()],
                 Some(VerificationSpec {
-                    verification_inputs: BTreeMap::new(),
-                    verification_args: vec!["test".to_string()],
+                    verification_inputs: BTreeMap::from([("msg".to_string(), "test".to_string())]),
                     expected_exit: 0,
                     expected_output_contains: Some("test".to_string()),
                 }),
@@ -1165,12 +1202,10 @@ mod tests {
                 vec![ToolInput {
                     name: "arg".to_string(),
                     description: "argument".to_string(),
-                    required: true,
                 }],
                 vec!["{arg}".to_string()],
                 Some(VerificationSpec {
-                    verification_inputs: BTreeMap::new(),
-                    verification_args: vec!["ok".to_string()],
+                    verification_inputs: BTreeMap::from([("arg".to_string(), "ok".to_string())]),
                     expected_exit: 0,
                     expected_output_contains: Some("ok".to_string()),
                 }),
@@ -1244,7 +1279,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("ok".to_string()),
                 }),
@@ -1285,7 +1319,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("verified".to_string()),
                 }),
@@ -1315,7 +1348,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("original".to_string()),
                 }),
@@ -1333,7 +1365,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("replacement".to_string()),
                 }),
@@ -1359,7 +1390,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: None,
                 }),
@@ -1387,12 +1417,10 @@ mod tests {
                 vec![ToolInput {
                     name: "msg".to_string(),
                     description: "message to echo".to_string(),
-                    required: true,
                 }],
                 vec!["{msg}".to_string()],
                 Some(VerificationSpec {
-                    verification_inputs: BTreeMap::new(),
-                    verification_args: vec!["test".to_string()],
+                    verification_inputs: BTreeMap::from([("msg".to_string(), "test".to_string())]),
                     expected_exit: 0,
                     expected_output_contains: Some("test".to_string()),
                 }),
@@ -1426,7 +1454,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("ok".to_string()),
                 }),

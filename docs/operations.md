@@ -108,12 +108,13 @@ workspace/.topagent/
   lessons/                    # saved lesson notes (JSON)
   tools/                      # generated custom tools (manifests + scripts)
   telegram-history/           # per-chat transcript evidence files (JSON)
+  telegram-settings/          # per-chat Telegram operator settings (JSON)
   external-tools.json         # workspace external tool definitions (if present)
 ```
 
 Created automatically as needed. Not removed by `topagent uninstall`.
 
-If a generated tool has an invalid manifest or is missing `script.sh`, TopAgent keeps the artifact on disk but reports it as a workspace warning instead of silently loading it.
+If a generated tool has an invalid manifest, is missing `script.sh`, is missing its stored script hash, or its current `script.sh` no longer matches the verified hash, TopAgent keeps the artifact on disk but reports it as a workspace warning instead of silently loading it.
 
 TopAgent still reads a legacy workspace-root `commands.json` file for compatibility, but
 `.topagent/external-tools.json` is the canonical location now.
@@ -168,10 +169,20 @@ If memory conflicts with the current repo, runtime, config, or service state, th
 
 - Clears `workspace/.topagent/telegram-history/chat-<chat_id>.json`
 - Clears any in-memory running state for that chat
+- Does **not** remove `workspace/.topagent/telegram-settings/chat-<chat_id>.json`
 - Does **not** remove `MEMORY.md`
 - Does **not** remove topic files, plans, lessons, or tools
 
 This keeps reset semantics simple and compatible with the existing product shape.
+
+### `/tool_authoring on|off`
+
+Telegram supports a per-chat operator toggle for generated-tool authoring:
+
+- `/tool_authoring on` enables `create_tool`, `repair_tool`, `list_generated_tools`, and `delete_generated_tool` for future tasks in that chat
+- `/tool_authoring off` disables those tools for future tasks in that chat
+- The setting is persisted to `workspace/.topagent/telegram-settings/chat-<chat_id>.json`
+- The currently running task, if any, keeps the setting it started with
 
 ### Lightweight consolidation / pruning
 
@@ -188,7 +199,7 @@ Plans and lessons are saved under `.topagent/plans/` and `.topagent/lessons/` re
 
 ### Config
 
-The env file at `~/.config/topagent/services/topagent-telegram.env` stores the API key, bot token, provider, model, workspace path, and runtime options. It has mode 0600 (owner-readable only). Re-running `topagent install` overwrites it.
+The env file at `~/.config/topagent/services/topagent-telegram.env` stores the API key, bot token, provider, model, workspace path, tool-authoring mode, and other runtime options. It has mode 0600 (owner-readable only). Re-running `topagent install` overwrites it.
 
 ## TOPAGENT.md
 
@@ -242,6 +253,7 @@ curl "https://api.telegram.org/bot<YOUR_TOKEN>/deleteWebhook"
 ### Agent produces poor results
 
 - Try a different model: `topagent install` then change the model, or use `--model` flag
+- Enable generated-tool authoring explicitly when needed: `--tool-authoring on`
 - Add a `TOPAGENT.md` with project-specific guidance
 - Break large tasks into smaller, more specific instructions
 

@@ -147,24 +147,18 @@ impl Tool for CreateToolTool {
                             "type": "object",
                             "properties": {
                                 "name": { "type": "string" },
-                                "description": { "type": "string" },
-                                "required": { "type": "boolean" }
+                                "description": { "type": "string" }
                             },
                             "required": ["name", "description"]
                         }
                     },
                     "argv_template": {
                         "type": "array",
-                        "description": "command argv template with {var_name} placeholders, e.g. ['./script.sh', '{path}', '--flag', '{pattern}']"
-                    },
-                    "verification_args": {
-                        "type": "array",
-                        "description": "legacy positional verification values; for tools with named inputs, values are matched in declared input order",
-                        "items": { "type": "string" }
+                        "description": "command argv template with {var_name} placeholders, e.g. ['{path}', '--flag', '{pattern}']"
                     },
                     "verification_inputs": {
                         "type": "object",
-                        "description": "named verification inputs that use the same contract as runtime tool execution",
+                        "description": "named verification inputs that use the same contract as runtime tool execution; omit this for tools with no runtime inputs",
                         "additionalProperties": { "type": "string" }
                     },
                     "expected_exit": {
@@ -176,11 +170,7 @@ impl Tool for CreateToolTool {
                         "description": "optional string that must appear in verification output"
                     }
                 },
-                "required": ["name", "description", "script"],
-                "anyOf": [
-                    { "required": ["verification_args"] },
-                    { "required": ["verification_inputs"] }
-                ]
+                "required": ["name", "description", "script"]
             }),
         }
     }
@@ -258,8 +248,7 @@ impl Tool for RepairToolTool {
                             "type": "object",
                             "properties": {
                                 "name": { "type": "string" },
-                                "description": { "type": "string" },
-                                "required": { "type": "boolean" }
+                                "description": { "type": "string" }
                             },
                             "required": ["name", "description"]
                         }
@@ -268,14 +257,9 @@ impl Tool for RepairToolTool {
                         "type": "array",
                         "description": "optional command argv template with {var_name} placeholders"
                     },
-                    "verification_args": {
-                        "type": "array",
-                        "description": "legacy positional verification values; for tools with named inputs, values are matched in declared input order",
-                        "items": { "type": "string" }
-                    },
                     "verification_inputs": {
-                        "type": "object",
-                        "description": "named verification inputs that use the same contract as runtime tool execution",
+                        "type": "object", 
+                        "description": "optional named verification inputs that use the same contract as runtime tool execution",
                         "additionalProperties": { "type": "string" }
                     },
                     "expected_exit": {
@@ -287,11 +271,7 @@ impl Tool for RepairToolTool {
                         "description": "optional string that must appear in output"
                     }
                 },
-                "required": ["name", "script"],
-                "anyOf": [
-                    { "required": ["verification_args"] },
-                    { "required": ["verification_inputs"] }
-                ]
+                "required": ["name", "script"]
             }),
         }
     }
@@ -318,7 +298,7 @@ impl Tool for RepairToolTool {
             &script,
             inputs,
             argv_template,
-            Some(&parse_verification_spec(&args)?),
+            parse_repair_verification_spec(&args)?.as_ref(),
         )?;
 
         if result.success {
@@ -375,7 +355,6 @@ fn parse_string_array(args: &serde_json::Value, key: &str) -> Result<Vec<String>
 fn parse_verification_spec(args: &serde_json::Value) -> Result<VerificationSpec> {
     Ok(VerificationSpec {
         verification_inputs: parse_string_map(args, "verification_inputs")?,
-        verification_args: parse_string_array(args, "verification_args")?,
         expected_exit: args
             .get("expected_exit")
             .and_then(|value| value.as_i64())
@@ -386,6 +365,18 @@ fn parse_verification_spec(args: &serde_json::Value) -> Result<VerificationSpec>
             .filter(|value| !value.is_empty())
             .map(String::from),
     })
+}
+
+fn parse_repair_verification_spec(args: &serde_json::Value) -> Result<Option<VerificationSpec>> {
+    let has_override = args.get("verification_inputs").is_some()
+        || args.get("expected_exit").is_some()
+        || args.get("expected_output_contains").is_some();
+
+    if has_override {
+        Ok(Some(parse_verification_spec(args)?))
+    } else {
+        Ok(None)
+    }
 }
 
 fn parse_string_map(args: &serde_json::Value, key: &str) -> Result<BTreeMap<String, String>> {
@@ -429,8 +420,7 @@ mod tests {
                 "name": "bad_inputs",
                 "description": "broken",
                 "script": "echo ok",
-                "inputs": ["not an object"],
-                "verification_args": []
+                "inputs": ["not an object"]
             }),
             &ctx,
         );
@@ -455,8 +445,7 @@ mod tests {
                 "name": "bad_argv",
                 "description": "broken",
                 "script": "echo ok",
-                "argv_template": [1],
-                "verification_args": []
+                "argv_template": [1]
             }),
             &ctx,
         );
@@ -485,7 +474,6 @@ mod tests {
                 vec![],
                 Some(VerificationSpec {
                     verification_inputs: BTreeMap::new(),
-                    verification_args: vec![],
                     expected_exit: 0,
                     expected_output_contains: Some("ok".to_string()),
                 }),
@@ -502,5 +490,42 @@ mod tests {
 
         assert!(output.contains("[unavailable] broken_after_verify"));
         assert!(output.contains("missing script.sh"));
+    }
+
+    #[test]
+    fn test_repair_tool_preserves_existing_verification_when_override_is_omitted() {
+        let temp = TempDir::new().unwrap();
+        let exec = ExecutionContext::new(temp.path().to_path_buf());
+        let runtime = RuntimeOptions::default();
+        let ctx = ToolContext::new(&exec, &runtime);
+        let genesis = ToolGenesis::new(temp.path().to_path_buf());
+
+        genesis
+            .create_tool(
+                "repairable",
+                "repairable tool",
+                "exit 1",
+                vec![],
+                vec![],
+                Some(VerificationSpec {
+                    verification_inputs: BTreeMap::new(),
+                    expected_exit: 0,
+                    expected_output_contains: Some("fixed".to_string()),
+                }),
+            )
+            .unwrap();
+
+        let tool = RepairToolTool::new();
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "name": "repairable",
+                    "script": "echo fixed"
+                }),
+                &ctx,
+            )
+            .unwrap();
+
+        assert!(output.contains("repaired and verified successfully"));
     }
 }

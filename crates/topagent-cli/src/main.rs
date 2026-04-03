@@ -8,7 +8,7 @@ mod service;
 mod telegram;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -31,6 +31,18 @@ use crate::memory::WorkspaceMemory;
 use crate::progress::LiveProgress;
 use crate::service::{run_install, run_service_command, run_status, run_uninstall};
 use crate::telegram::run_telegram;
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ToolAuthoringMode {
+    On,
+    Off,
+}
+
+impl ToolAuthoringMode {
+    fn is_enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -78,6 +90,15 @@ struct Cli {
 
     #[arg(long, global = true, help = "Provider timeout in seconds")]
     timeout_secs: Option<u64>,
+
+    #[arg(
+        long = "tool-authoring",
+        alias = "generated-tool-authoring",
+        global = true,
+        value_enum,
+        help = "Enable or disable generated-tool authoring tools for this run or installed service"
+    )]
+    tool_authoring: Option<ToolAuthoringMode>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -142,6 +163,7 @@ fn main() -> Result<()> {
         max_steps: cli.max_steps,
         max_retries: cli.max_retries,
         timeout_secs: cli.timeout_secs,
+        generated_tool_authoring: cli.tool_authoring.map(ToolAuthoringMode::is_enabled),
     };
 
     match command {
@@ -187,7 +209,8 @@ fn run_one_shot(params: CliParams, instruction: String) -> Result<()> {
     let workspace = resolve_workspace_path(params.workspace)?;
     let cancel_token = CancellationToken::new();
     let mut ctx = ExecutionContext::new(workspace).with_cancel_token(cancel_token.clone());
-    let options = build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs);
+    let options = build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs)
+        .with_generated_tool_authoring(params.generated_tool_authoring.unwrap_or(false));
     let route = build_route(params.provider, params.model)?;
     let api_key = require_openrouter_api_key(params.api_key)?;
     let workspace_memory = WorkspaceMemory::new(ctx.workspace_root.clone());

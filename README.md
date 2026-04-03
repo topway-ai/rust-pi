@@ -58,6 +58,7 @@ TopAgent keeps Telegram memory in three layers:
 | `/help`  | Same as /start                     |
 | `/stop`  | Cancel the currently running task  |
 | `/reset` | Clear this chat's saved transcript |
+| `/tool_authoring on|off` | Enable or disable generated-tool authoring for this chat |
 
 ### Service management
 
@@ -84,6 +85,7 @@ See [docs/operations.md](docs/operations.md) for full operational details.
 | `--max-steps`         | `50`           | Maximum agent loop iterations      |
 | `--max-retries`       | `3`            | Maximum provider retry attempts    |
 | `--timeout-secs`      | `120`          | Provider request timeout           |
+| `--tool-authoring`    | `off`          | Enable or disable generated-tool authoring tools |
 
 ## Project instructions
 
