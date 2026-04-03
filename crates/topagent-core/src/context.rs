@@ -7,6 +7,7 @@ pub struct ExecutionContext {
     pub workspace_root: PathBuf,
     cancel_token: Option<CancellationToken>,
     secrets: SecretRegistry,
+    memory_context: Option<String>,
 }
 
 impl ExecutionContext {
@@ -15,6 +16,7 @@ impl ExecutionContext {
             workspace_root,
             cancel_token: None,
             secrets: SecretRegistry::new(),
+            memory_context: None,
         }
     }
 
@@ -28,8 +30,22 @@ impl ExecutionContext {
         self
     }
 
+    pub fn with_memory_context(mut self, memory_context: impl Into<String>) -> Self {
+        let memory_context = memory_context.into();
+        self.memory_context = if memory_context.trim().is_empty() {
+            None
+        } else {
+            Some(memory_context)
+        };
+        self
+    }
+
     pub fn secrets(&self) -> &SecretRegistry {
         &self.secrets
+    }
+
+    pub fn memory_context(&self) -> Option<&str> {
+        self.memory_context.as_deref()
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -160,5 +176,12 @@ mod tests {
         assert!(path.exists());
         let content = fs::read_to_string(path).unwrap();
         assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn test_memory_context_round_trip() {
+        let (ctx, _temp) = create_context();
+        let ctx = ctx.with_memory_context("memory");
+        assert_eq!(ctx.memory_context(), Some("memory"));
     }
 }

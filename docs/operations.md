@@ -84,7 +84,7 @@ topagent uninstall           # remove service, config, and installed binary
 
 `topagent service uninstall` does steps 1-2 only.
 
-Neither command removes the workspace directory or chat history. Delete those manually if needed.
+Neither command removes the workspace directory, curated memory files, or chat transcripts. Delete those manually if needed.
 
 ## Workspace behavior
 
@@ -96,17 +96,19 @@ The workspace is the root directory the agent operates in. All file paths are re
 | Telegram (`topagent install`) | Interactive prompt with default, or `--workspace` |
 | Foreground Telegram (`topagent telegram`) | Current directory, or `--workspace` |
 
-The workspace must exist and be a directory. The agent creates a `.topagent/` subdirectory inside it for plans, lessons, tools, and chat history.
+The workspace must exist and be a directory. The agent creates a `.topagent/` subdirectory inside it for plans, lessons, tools, memory files, and chat transcripts.
 
 ### .topagent/ directory
 
 ```
 workspace/.topagent/
+  MEMORY.md                  # thin workspace memory index (always loaded)
+  topics/                    # compact durable topic notes (lazy loaded)
   plans/                      # saved plans (JSON)
   lessons/                    # saved lesson notes (JSON)
   tools/                      # generated custom tools (manifests + scripts)
   tool-genesis/proposals/     # tool proposals awaiting approval
-  telegram-history/           # per-chat history files (JSON)
+  telegram-history/           # per-chat transcript evidence files (JSON)
   commands.json               # custom command definitions (if present)
 ```
 
@@ -114,14 +116,67 @@ Created automatically as needed. Not removed by `topagent uninstall`.
 
 ## Persistence and reset
 
-### Telegram chat history
+### Three memory layers
 
-Each Telegram chat has a separate history file at `workspace/.topagent/telegram-history/chat-<chat_id>.json`. History is loaded at the start of each message and saved after the agent finishes.
+#### 1. Always-loaded memory index
 
-- History survives service restarts
-- `/reset` in the Telegram chat clears the history for that chat
-- Manually deleting the JSON file has the same effect as `/reset`
-- When conversation exceeds 100 messages, the oldest half is dropped (keeping the most recent 50)
+`workspace/.topagent/MEMORY.md`
+
+- Tiny by design
+- One-line pointer entries only
+- Safe to inject at task start
+- Should reference topic files or durable facts, not transcript dumps
+
+#### 2. Lazy topic files
+
+`workspace/.topagent/topics/*.md`
+
+- Store compact durable notes by concern
+- Loaded only when the current task matches the topic
+- Good fits: architecture, runtime behavior, security constraints, open issues
+- Bad fits: shell logs, command dumps, transient plans, cheap repo summaries
+
+#### 3. Raw Telegram transcript evidence
+
+`workspace/.topagent/telegram-history/chat-<chat_id>.json`
+
+- One file per chat
+- Persists user-visible text exchanges across service restarts
+- Searchable evidence layer only
+- Not restored wholesale into model context
+- Retrieval returns targeted snippets only when useful
+- Trimmed to the most recent 100 persisted text messages
+
+### Retrieval behavior
+
+When a new Telegram message arrives, TopAgent:
+
+1. Loads `MEMORY.md`
+2. Selects only topic files whose topic/tags overlap the task
+3. Searches the raw transcript only when the task appears to refer to prior chat context
+4. Injects a small memory briefing that explicitly tells the model to treat memory as hints and re-check current code/runtime state
+
+If memory conflicts with the current repo, runtime, config, or service state, the current state wins.
+
+### `/reset`
+
+`/reset` remains a per-chat transcript reset:
+
+- Clears `workspace/.topagent/telegram-history/chat-<chat_id>.json`
+- Clears any in-memory running state for that chat
+- Does **not** remove `MEMORY.md`
+- Does **not** remove topic files, plans, lessons, or tools
+
+This keeps reset semantics simple and compatible with the existing product shape.
+
+### Lightweight consolidation / pruning
+
+TopAgent keeps memory lightweight with a small maintenance step:
+
+- exact duplicate `MEMORY.md` entries are deduplicated
+- topic files are never auto-expanded into the always-loaded index
+- transcript persistence strips tool chatter and other internal session noise
+- topic loading and transcript loading both cap how much can enter prompt context
 
 ### Plans and lessons
 

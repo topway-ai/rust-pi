@@ -2,6 +2,7 @@
 // Run: topagent "task" or topagent telegram
 mod config;
 mod managed_files;
+mod memory;
 mod progress;
 mod service;
 mod telegram;
@@ -18,6 +19,7 @@ use topagent_core::{
     context::ExecutionContext, create_provider, tools::default_tools, Agent, CancellationToken,
     ProgressCallback, ProgressUpdate,
 };
+use tracing::warn;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -25,6 +27,7 @@ use crate::config::{
     build_route, build_runtime_options, require_openrouter_api_key, resolve_workspace_path,
     CliParams,
 };
+use crate::memory::WorkspaceMemory;
 use crate::progress::LiveProgress;
 use crate::service::{run_install, run_service_command, run_status, run_uninstall};
 use crate::telegram::run_telegram;
@@ -183,10 +186,25 @@ fn install_ctrlc_handler(
 fn run_one_shot(params: CliParams, instruction: String) -> Result<()> {
     let workspace = resolve_workspace_path(params.workspace)?;
     let cancel_token = CancellationToken::new();
-    let ctx = ExecutionContext::new(workspace).with_cancel_token(cancel_token.clone());
+    let mut ctx = ExecutionContext::new(workspace).with_cancel_token(cancel_token.clone());
     let options = build_runtime_options(params.max_steps, params.max_retries, params.timeout_secs);
     let route = build_route(params.provider, params.model)?;
     let api_key = require_openrouter_api_key(params.api_key)?;
+    let workspace_memory = WorkspaceMemory::new(ctx.workspace_root.clone());
+
+    if let Err(err) = workspace_memory.consolidate_index_if_needed() {
+        warn!("failed to consolidate workspace memory index: {}", err);
+    }
+    match workspace_memory.build_prompt(&instruction, None) {
+        Ok(memory_prompt) => {
+            if let Some(memory_context) = memory_prompt.prompt {
+                ctx = ctx.with_memory_context(memory_context);
+            }
+        }
+        Err(err) => {
+            warn!("failed to load workspace memory context: {}", err);
+        }
+    }
 
     info!(
         "starting one-shot run | provider: {} | model: {} | workspace: {}",

@@ -917,6 +917,55 @@ fn test_topagent_md_loaded_when_present() {
 }
 
 #[test]
+fn test_workspace_memory_context_is_included_in_system_prompt() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().to_path_buf();
+    let ctx = ExecutionContext::new(root).with_memory_context(
+        "Treat memory as hints, not truth.\n- [verified] architecture -> topics/architecture.md",
+    );
+
+    struct CheckPromptProvider {
+        pub captured_messages: Arc<RwLock<Vec<Message>>>,
+    }
+    impl CheckPromptProvider {
+        fn new() -> Self {
+            Self {
+                captured_messages: Arc::new(RwLock::new(Vec::new())),
+            }
+        }
+    }
+    impl Provider for CheckPromptProvider {
+        fn complete(
+            &self,
+            messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
+            let mut captured = self.captured_messages.write().unwrap();
+            captured.extend(messages.to_vec());
+            Ok(ProviderResponse::Message(Message::assistant("done")))
+        }
+    }
+
+    let provider = CheckPromptProvider::new();
+    let provider_ref = Arc::clone(&provider.captured_messages);
+    let mut agent = Agent::new(Box::new(provider), make_tools());
+    let _ = agent.run(&ctx, "test");
+    let captured = provider_ref.read().unwrap();
+    let system_prompt = captured.first().and_then(|m| m.as_text()).unwrap_or("");
+
+    assert!(
+        system_prompt.contains("Workspace Memory"),
+        "expected workspace memory section in system prompt: {}",
+        system_prompt
+    );
+    assert!(
+        system_prompt.contains("Treat memory as hints, not truth"),
+        "expected memory skepticism note in system prompt: {}",
+        system_prompt
+    );
+}
+
+#[test]
 fn test_agent_tracks_changed_files_on_write() {
     let (ctx, _temp) = make_test_context();
 

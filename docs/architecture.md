@@ -53,7 +53,8 @@ The binary crate. Handles CLI parsing, user interaction, and service management.
 |--------|---------------|
 | `main` | CLI argument parsing (clap), command dispatch, one-shot runner |
 | `config` | CliParams struct, parameter validation, route/options construction |
-| `telegram` | Telegram polling loop, ChatSessionManager, per-chat history persistence |
+| `telegram` | Telegram polling loop, ChatSessionManager, per-chat transcript persistence |
+| `memory` | Workspace memory index/topic loading, transcript evidence retrieval, lightweight consolidation |
 | `service` | systemd service install/status/start/stop/restart/uninstall |
 | `managed_files` | Managed file guards, env file I/O, safe file removal |
 | `progress` | LiveProgress: CLI and Telegram progress formatting |
@@ -65,11 +66,12 @@ The binary crate. Handles CLI parsing, user interaction, and service management.
 ```
 CLI parses args
   -> resolve workspace, API key, model route
-  -> create ExecutionContext with workspace + cancel token
+  -> build workspace memory briefing from .topagent/MEMORY.md + relevant topic files
+  -> create ExecutionContext with workspace + cancel token + memory briefing
   -> create Agent with provider + tools + options
   -> agent.run(ctx, instruction)
      -> load TOPAGENT.md, external tools, commands
-     -> build system prompt
+     -> build system prompt (+ project instructions + workspace memory briefing)
      -> classify task complexity -> activate planning gate if non-trivial
      -> enter step loop:
         1. send conversation to LLM
@@ -88,22 +90,24 @@ CLI parses args
   -> resolve config (token, API key, workspace, model)
   -> register secrets for redaction
   -> create TelegramAdapter (long-polling)
-  -> create ChatSessionManager (per-chat agents + history)
+  -> create ChatSessionManager (per-chat running tasks + transcript store + workspace memory)
   -> enter polling loop:
      1. fetch new messages from Telegram API
      2. for each message:
         - /start, /help -> reply with config summary
         - /stop -> cancel running task for that chat
-        - /reset -> clear persisted history for that chat
+        - /reset -> clear persisted transcript for that chat
         - text -> start_message:
-          a. restore persisted history into agent session
-          b. agent.run(ctx, message)
-          c. persist updated history to disk
-          d. send reply (split into chunks if >4000 chars)
+          a. load `.topagent/MEMORY.md` (always)
+          b. load matching `.topagent/topics/*.md` files only if relevant
+          c. search the saved Telegram transcript and extract targeted snippets only if useful
+          d. build a fresh agent run with that memory briefing
+          e. append the filtered user-visible transcript to disk
+          f. send reply (split into chunks if >4000 chars)
      3. on polling error: retry with backoff
 ```
 
-Each chat gets its own Agent instance. History is persisted to `workspace/.topagent/telegram-history/chat-<chat_id>.json` and survives service restarts.
+Each chat gets its own running task state. The raw transcript is persisted to `workspace/.topagent/telegram-history/chat-<chat_id>.json` and survives service restarts, but it is no longer restored wholesale into a model session.
 
 ### Service install flow
 
@@ -140,17 +144,29 @@ Secrets are protected at multiple layers:
 
 7. **Prompt rules**: the system prompt instructs the LLM to never reveal credentials
 
-### Persistence flow
+### Memory and persistence flow
 
-Telegram chat history is persisted per-chat:
+TopAgent now uses three memory layers:
 
-```
-workspace/.topagent/telegram-history/chat-<chat_id>.json
-```
+1. **Always-loaded index**: `workspace/.topagent/MEMORY.md`
+   - one-line entries only
+   - cheap enough to load at task start
+   - points to topic files instead of embedding large notes
+2. **Lazy topic files**: `workspace/.topagent/topics/*.md`
+   - compact durable notes by concern (`architecture`, `security`, `runtime`, etc.)
+   - loaded only when the current task overlaps the topic name/tags/summary
+3. **Raw transcript evidence**: `workspace/.topagent/telegram-history/chat-<chat_id>.json`
+   - searchable per-chat transcript
+   - stores user-visible text exchanges, not tool chatter
+   - never replayed in full by default; retrieval returns targeted snippets only
 
-Format: JSON with a version field and an array of messages (role + content). History is loaded when a new message arrives and saved after each agent run completes. The `/reset` bot command deletes the history file for that chat.
+`/reset` deletes only the per-chat transcript file. It does not touch `MEMORY.md`, topic files, plans, or lessons.
 
-When conversation exceeds 100 messages, the oldest half is dropped (keeping the most recent 50), with a note about truncated messages inserted.
+Lightweight consolidation keeps the index practical:
+
+- exact duplicate `MEMORY.md` entries are deduplicated
+- missing or unreadable topic files are skipped during retrieval
+- the index load path caps injected bytes so startup memory stays cheap
 
 ### Planning flow
 

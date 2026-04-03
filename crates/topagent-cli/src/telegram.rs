@@ -11,16 +11,18 @@ use topagent_core::{
     create_provider,
     model::ModelRoute,
     tools::default_tools,
-    Agent, CancellationToken, ProgressCallback, ProgressUpdate, RuntimeOptions, TelegramAdapter,
-    POLL_TIMEOUT_SECS,
+    Agent, CancellationToken, Message, ProgressCallback, ProgressUpdate, Role, RuntimeOptions,
+    TelegramAdapter, POLL_TIMEOUT_SECS,
 };
 use tracing::{error, info, warn};
 
 use crate::config::*;
 use crate::managed_files::write_managed_file;
+use crate::memory::WorkspaceMemory;
 use crate::progress::LiveProgress;
 
 const TELEGRAM_HISTORY_VERSION: u32 = 1;
+const MAX_PERSISTED_TRANSCRIPT_MESSAGES: usize = 100;
 
 pub(crate) fn run_telegram(token: Option<String>, params: CliParams) -> Result<()> {
     let config = resolve_telegram_mode_config(token, params)?;
@@ -134,7 +136,7 @@ pub(crate) fn run_telegram(token: Option<String>, params: CliParams) -> Result<(
                              Commands:\n\
                              /help - show this message\n\
                              /stop - stop the current task\n\
-                             /reset - clear conversation history\n\n\
+                             /reset - clear this chat's saved transcript\n\n\
                              Send a plain text message to start a task.",
                             workspace_label, provider_label, model_label
                         );
@@ -158,7 +160,8 @@ pub(crate) fn run_telegram(token: Option<String>, params: CliParams) -> Result<(
                                 .to_string()
                         } else {
                             session_manager.reset_chat(chat_id);
-                            "Conversation history cleared.".to_string()
+                            "Saved chat transcript cleared for this chat. Curated workspace memory was left unchanged."
+                                .to_string()
                         };
                         send_telegram(&adapter, chat_id, vec![reply], None);
                         continue;
@@ -209,8 +212,37 @@ fn send_telegram(
     }
 }
 
-fn persist_agent_history_to_store(history_store: &ChatHistoryStore, chat_id: i64, agent: &Agent) {
-    let messages = agent.conversation_messages();
+fn build_persisted_transcript(messages: &[Message], final_response: Option<&str>) -> Vec<Message> {
+    let mut transcript: Vec<_> = messages
+        .iter()
+        .filter_map(|message| match (message.role, message.as_text()) {
+            (Role::User, Some(text)) => Some(Message::user(text)),
+            (Role::Assistant, Some(text)) => Some(Message::assistant(text)),
+            _ => None,
+        })
+        .collect();
+
+    if let Some(final_response) = final_response {
+        if let Some(last_assistant) = transcript
+            .iter_mut()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+        {
+            *last_assistant = Message::assistant(final_response);
+        } else {
+            transcript.push(Message::assistant(final_response));
+        }
+    }
+
+    if transcript.len() > MAX_PERSISTED_TRANSCRIPT_MESSAGES {
+        let keep_start = transcript.len() - MAX_PERSISTED_TRANSCRIPT_MESSAGES;
+        transcript.drain(..keep_start);
+    }
+
+    transcript
+}
+
+fn persist_messages_to_store(history_store: &ChatHistoryStore, chat_id: i64, messages: &[Message]) {
     if messages.is_empty() {
         if let Err(err) = history_store.clear(chat_id) {
             warn!(
@@ -241,6 +273,35 @@ fn persist_agent_history_to_store(history_store: &ChatHistoryStore, chat_id: i64
             );
         }
     }
+}
+
+fn persist_agent_history_to_store(
+    history_store: &ChatHistoryStore,
+    chat_id: i64,
+    agent: &Agent,
+    final_response: Option<&str>,
+) {
+    let mut messages = match history_store.load(chat_id) {
+        Ok(existing) => build_persisted_transcript(&existing, None),
+        Err(err) => {
+            warn!(
+                "failed to load existing Telegram transcript for chat {} from {} before saving: {}",
+                chat_id,
+                history_store.path_for_chat(chat_id).display(),
+                err
+            );
+            Vec::new()
+        }
+    };
+    messages.extend(build_persisted_transcript(
+        &agent.conversation_messages(),
+        final_response,
+    ));
+    if messages.len() > MAX_PERSISTED_TRANSCRIPT_MESSAGES {
+        let keep_start = messages.len() - MAX_PERSISTED_TRANSCRIPT_MESSAGES;
+        messages.drain(..keep_start);
+    }
+    persist_messages_to_store(history_store, chat_id, &messages);
 }
 
 // ── Chat history persistence ──
@@ -322,25 +383,16 @@ pub(crate) struct ChatSessionManager {
     api_key: String,
     options: RuntimeOptions,
     history_store: ChatHistoryStore,
+    memory: WorkspaceMemory,
     secrets: topagent_core::SecretRegistry,
-    pub sessions: HashMap<i64, SessionState>,
-    completed_tx: mpsc::Sender<CompletedChatTask>,
-    completed_rx: mpsc::Receiver<CompletedChatTask>,
-}
-
-pub(crate) enum SessionState {
-    Idle(Box<Agent>),
-    Running(RunningChatTask),
+    pub sessions: HashMap<i64, RunningChatTask>,
+    completed_tx: mpsc::Sender<i64>,
+    completed_rx: mpsc::Receiver<i64>,
 }
 
 pub(crate) struct RunningChatTask {
     pub cancel_token: CancellationToken,
     pub progress_callback: Option<ProgressCallback>,
-}
-
-struct CompletedChatTask {
-    chat_id: i64,
-    agent: Agent,
 }
 
 impl ChatSessionManager {
@@ -352,11 +404,28 @@ impl ChatSessionManager {
         secrets: topagent_core::SecretRegistry,
     ) -> Self {
         let (completed_tx, completed_rx) = mpsc::channel();
+        let memory = WorkspaceMemory::new(workspace_root.clone());
+        if let Err(err) = memory.ensure_layout() {
+            warn!(
+                "failed to initialize workspace memory layout in {}: {}",
+                workspace_root.display(),
+                err
+            );
+        }
+        if let Err(err) = memory.consolidate_index_if_needed() {
+            warn!(
+                "failed to consolidate workspace memory index in {}: {}",
+                workspace_root.display(),
+                err
+            );
+        }
+
         Self {
             route,
             api_key,
             options,
             history_store: ChatHistoryStore::new(workspace_root),
+            memory,
             secrets,
             sessions: HashMap::new(),
             completed_tx,
@@ -376,54 +445,75 @@ impl ChatSessionManager {
         Agent::with_options(provider, tools.into_inner(), self.options.clone())
     }
 
-    fn create_restored_agent(&self, chat_id: i64) -> Agent {
-        let mut agent = self.create_agent();
-        match self.history_store.load(chat_id) {
-            Ok(messages) if !messages.is_empty() => {
-                let restored_count = messages.len();
-                let messages: Vec<_> = messages
-                    .into_iter()
-                    .map(|m| m.redact_secrets(&self.secrets))
-                    .collect();
-                agent.restore_conversation_messages(messages);
-                info!(
-                    "restored {} Telegram history messages for chat {} from {}",
-                    restored_count,
-                    chat_id,
-                    self.history_store.path_for_chat(chat_id).display()
-                );
-            }
-            Ok(_) => {}
+    fn build_memory_context(&self, chat_id: i64, instruction: &str) -> Option<String> {
+        if let Err(err) = self.memory.consolidate_index_if_needed() {
+            warn!(
+                "failed to consolidate workspace memory index in {}: {}",
+                self.history_store.history_dir.display(),
+                err
+            );
+        }
+
+        let transcript = match self.history_store.load(chat_id) {
+            Ok(messages) => messages
+                .into_iter()
+                .map(|message| message.redact_secrets(&self.secrets))
+                .collect::<Vec<_>>(),
             Err(err) => {
                 warn!(
-                    "failed to restore Telegram history for chat {} from {}: {}",
+                    "failed to load Telegram transcript for chat {} from {}: {}",
                     chat_id,
                     self.history_store.path_for_chat(chat_id).display(),
                     err
                 );
+                Vec::new()
+            }
+        };
+
+        match self.memory.build_prompt(instruction, Some(&transcript)) {
+            Ok(memory_prompt) => memory_prompt.prompt,
+            Err(err) => {
+                warn!(
+                    "failed to build workspace memory context for chat {} in {}: {}",
+                    chat_id,
+                    self.history_store.path_for_chat(chat_id).display(),
+                    err
+                );
+                None
             }
         }
-        agent
     }
 
+    fn build_run_context(
+        &self,
+        ctx: &ExecutionContext,
+        chat_id: i64,
+        instruction: &str,
+    ) -> ExecutionContext {
+        let mut run_ctx = ctx.clone();
+        if let Some(memory_context) = self.build_memory_context(chat_id, instruction) {
+            run_ctx = run_ctx.with_memory_context(memory_context);
+        }
+        run_ctx
+    }
+
+    #[cfg(test)]
     pub fn persist_agent_history(&self, chat_id: i64, agent: &Agent) {
-        persist_agent_history_to_store(&self.history_store, chat_id, agent);
+        persist_agent_history_to_store(&self.history_store, chat_id, agent, None);
     }
 
     fn collect_finished_tasks(&mut self) {
-        while let Ok(task) = self.completed_rx.try_recv() {
-            self.persist_agent_history(task.chat_id, &task.agent);
-            self.sessions
-                .insert(task.chat_id, SessionState::Idle(Box::new(task.agent)));
+        while let Ok(chat_id) = self.completed_rx.try_recv() {
+            self.sessions.remove(&chat_id);
         }
     }
 
     fn is_task_running(&self, chat_id: i64) -> bool {
-        matches!(self.sessions.get(&chat_id), Some(SessionState::Running(_)))
+        self.sessions.contains_key(&chat_id)
     }
 
     fn stop_chat(&mut self, chat_id: i64) -> bool {
-        let Some(SessionState::Running(task)) = self.sessions.get(&chat_id) else {
+        let Some(task) = self.sessions.get(&chat_id) else {
             return false;
         };
 
@@ -447,11 +537,7 @@ impl ChatSessionManager {
     }
 
     fn broadcast_progress(&self, update: ProgressUpdate) {
-        for session in self.sessions.values() {
-            let SessionState::Running(task) = session else {
-                continue;
-            };
-
+        for task in self.sessions.values() {
             if let Some(callback) = &task.progress_callback {
                 callback(update.clone());
             }
@@ -463,7 +549,7 @@ impl ChatSessionManager {
         match self.history_store.clear(chat_id) {
             Ok(true) => {
                 info!(
-                    "cleared Telegram history for chat {} from {}",
+                    "cleared Telegram transcript for chat {} from {}",
                     chat_id,
                     self.history_store.path_for_chat(chat_id).display()
                 );
@@ -471,7 +557,7 @@ impl ChatSessionManager {
             Ok(false) => {}
             Err(err) => {
                 warn!(
-                    "failed to clear Telegram history for chat {} from {}: {}",
+                    "failed to clear Telegram transcript for chat {} from {}: {}",
                     chat_id,
                     self.history_store.path_for_chat(chat_id).display(),
                     err
@@ -496,20 +582,14 @@ impl ChatSessionManager {
         }
 
         let heartbeat_interval = Duration::from_secs(self.options.progress_heartbeat_secs);
-        let mut agent = match self.sessions.remove(&chat_id) {
-            Some(SessionState::Idle(agent)) => *agent,
-            Some(SessionState::Running(task)) => {
-                self.sessions.insert(chat_id, SessionState::Running(task));
-                return vec![
-                    "A task is already running in this chat. Send /stop to cancel it or wait for it to finish."
-                        .to_string(),
-                ];
-            }
-            None => self.create_restored_agent(chat_id),
-        };
+        let mut agent = self.create_agent();
 
         let cancel_token = CancellationToken::new();
-        let run_ctx = ctx.clone().with_cancel_token(cancel_token.clone());
+        let run_ctx = self.build_run_context(
+            &ctx.clone().with_cancel_token(cancel_token.clone()),
+            chat_id,
+            text,
+        );
         let progress =
             match LiveProgress::for_telegram(heartbeat_interval, adapter.clone(), chat_id) {
                 Ok(progress) => Some(progress),
@@ -534,7 +614,12 @@ impl ChatSessionManager {
 
             let result = agent.run(&run_ctx, &instruction);
             agent.set_progress_callback(None);
-            persist_agent_history_to_store(&history_store, chat_id, &agent);
+            match &result {
+                Ok(response) => {
+                    persist_agent_history_to_store(&history_store, chat_id, &agent, Some(response))
+                }
+                Err(_) => persist_agent_history_to_store(&history_store, chat_id, &agent, None),
+            }
 
             if let Some(progress) = progress {
                 progress.wait();
@@ -565,15 +650,15 @@ impl ChatSessionManager {
                 }
             }
 
-            let _ = completed_tx.send(CompletedChatTask { chat_id, agent });
+            let _ = completed_tx.send(chat_id);
         });
 
         self.sessions.insert(
             chat_id,
-            SessionState::Running(RunningChatTask {
+            RunningChatTask {
                 cancel_token,
                 progress_callback,
-            }),
+            },
         );
         Vec::new()
     }
@@ -609,10 +694,10 @@ mod tests {
 
         manager.sessions.insert(
             42,
-            SessionState::Running(RunningChatTask {
+            RunningChatTask {
                 cancel_token: cancel_token.clone(),
                 progress_callback: Some(progress_callback),
-            }),
+            },
         );
 
         assert!(manager.stop_chat(42));
@@ -643,10 +728,10 @@ mod tests {
 
         manager.sessions.insert(
             42,
-            SessionState::Running(RunningChatTask {
+            RunningChatTask {
                 cancel_token: CancellationToken::new(),
                 progress_callback: Some(progress_callback),
-            }),
+            },
         );
 
         manager.notify_polling_retry();
@@ -672,10 +757,10 @@ mod tests {
 
         manager.sessions.insert(
             42,
-            SessionState::Running(RunningChatTask {
+            RunningChatTask {
                 cancel_token: CancellationToken::new(),
                 progress_callback: Some(progress_callback),
-            }),
+            },
         );
 
         manager.notify_polling_recovered();
@@ -690,7 +775,8 @@ mod tests {
     }
 
     #[test]
-    fn test_restart_restores_persisted_chat_history_for_new_manager() {
+    fn test_memory_context_retrieves_targeted_transcript_snippet_instead_of_restoring_whole_history(
+    ) {
         let workspace = TempDir::new().unwrap();
         let chat_id = 4242;
         let original_manager = test_manager(workspace.path().to_path_buf());
@@ -698,22 +784,23 @@ mod tests {
         original_agent.restore_conversation_messages(vec![
             Message::user("Remember this exact phrase: maple comet."),
             Message::assistant("Stored. I will remember maple comet."),
+            Message::user("Also keep cedar echo."),
+            Message::assistant("Stored. I will remember cedar echo."),
         ]);
-        persist_agent_history_to_store(&original_manager.history_store, chat_id, &original_agent);
+        persist_agent_history_to_store(
+            &original_manager.history_store,
+            chat_id,
+            &original_agent,
+            None,
+        );
 
         let restarted_manager = test_manager(workspace.path().to_path_buf());
-        let restored_agent = restarted_manager.create_restored_agent(chat_id);
-        let restored_messages = restored_agent.conversation_messages();
+        let memory_context = restarted_manager
+            .build_memory_context(chat_id, "What was the maple phrase I mentioned earlier?")
+            .unwrap();
 
-        assert_eq!(restored_messages.len(), 2);
-        assert_eq!(
-            restored_messages[0].as_text(),
-            Some("Remember this exact phrase: maple comet.")
-        );
-        assert_eq!(
-            restored_messages[1].as_text(),
-            Some("Stored. I will remember maple comet.")
-        );
+        assert!(memory_context.contains("maple comet"));
+        assert!(!memory_context.contains("cedar echo"));
         assert!(workspace
             .path()
             .join(".topagent")
@@ -740,17 +827,19 @@ mod tests {
     }
 
     #[test]
-    fn test_history_is_saved_to_disk_before_collect_finished_tasks() {
+    fn test_history_is_saved_to_disk_as_user_visible_transcript_only() {
         let workspace = TempDir::new().unwrap();
         let chat_id = 777;
         let manager = test_manager(workspace.path().to_path_buf());
         let mut agent = manager.create_agent();
         agent.restore_conversation_messages(vec![
             Message::user("Remember this exact phrase: cedar echo."),
+            Message::tool_request("tool-1", "bash", serde_json::json!({"command": "pwd"})),
+            Message::tool_result("tool-1", "/tmp/workspace"),
             Message::assistant("Stored. I will remember cedar echo."),
         ]);
 
-        persist_agent_history_to_store(&manager.history_store, chat_id, &agent);
+        persist_agent_history_to_store(&manager.history_store, chat_id, &agent, None);
 
         let persisted = manager.history_store.load(chat_id).unwrap();
         assert_eq!(persisted.len(), 2);
@@ -774,19 +863,26 @@ mod tests {
             Message::user("Remember this exact phrase: lunar pine."),
             Message::assistant("Stored. I will remember lunar pine."),
         ]);
-        persist_agent_history_to_store(&original_manager.history_store, chat_id, &original_agent);
+        persist_agent_history_to_store(
+            &original_manager.history_store,
+            chat_id,
+            &original_agent,
+            None,
+        );
 
         let restarted_manager = test_manager(workspace.path().to_path_buf());
-        let mut restored_agent = restarted_manager.create_restored_agent(chat_id);
-        let mut restored_messages = restored_agent.conversation_messages();
-        assert_eq!(restored_messages.len(), 2);
-        restored_messages.push(Message::user(
-            "What exact phrase did I ask you to remember before the restart?",
-        ));
-        restored_messages.push(Message::assistant("lunar pine"));
-        restored_agent.restore_conversation_messages(restored_messages);
+        let mut next_agent = restarted_manager.create_agent();
+        next_agent.restore_conversation_messages(vec![
+            Message::user("What exact phrase did I ask you to remember before the restart?"),
+            Message::assistant("lunar pine"),
+        ]);
 
-        persist_agent_history_to_store(&restarted_manager.history_store, chat_id, &restored_agent);
+        persist_agent_history_to_store(
+            &restarted_manager.history_store,
+            chat_id,
+            &next_agent,
+            None,
+        );
 
         let persisted = restarted_manager.history_store.load(chat_id).unwrap();
         assert_eq!(persisted.len(), 4);
@@ -821,12 +917,21 @@ mod tests {
             .join(".topagent")
             .join("telegram-history")
             .join("chat-9001.json");
+        let memory_index_path = workspace.path().join(".topagent").join("MEMORY.md");
         assert!(history_path.is_file());
+        assert!(memory_index_path.is_file());
 
-        manager.sessions.insert(chat_id, SessionState::Idle(Box::new(agent)));
+        manager.sessions.insert(
+            chat_id,
+            RunningChatTask {
+                cancel_token: CancellationToken::new(),
+                progress_callback: None,
+            },
+        );
         manager.reset_chat(chat_id);
 
         assert!(!history_path.exists());
+        assert!(memory_index_path.exists());
         assert!(!manager.sessions.contains_key(&chat_id));
     }
 }

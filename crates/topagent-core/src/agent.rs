@@ -1198,6 +1198,12 @@ impl Agent {
             }
         }
 
+        if let Some(memory_context) = ctx.memory_context() {
+            system_prompt.push_str("\n## Workspace Memory\n\n");
+            system_prompt.push_str(memory_context);
+            system_prompt.push('\n');
+        }
+
         if let Ok(plan) = self.plan.lock() {
             if !plan.is_empty() {
                 system_prompt.push_str("\n## Current Plan\n\n");

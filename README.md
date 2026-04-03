@@ -44,6 +44,12 @@ This prompts for your OpenRouter API key and Telegram bot token (from [BotFather
 
 Then open a private chat with your bot and send a message.
 
+TopAgent keeps Telegram memory in three layers:
+
+- a tiny always-loaded workspace index at `workspace/.topagent/MEMORY.md`
+- compact topic files under `workspace/.topagent/topics/`, loaded only when relevant
+- a per-chat raw transcript under `workspace/.topagent/telegram-history/`, used as searchable evidence rather than replayed wholesale
+
 ### Bot commands
 
 | Command  | Action                             |
@@ -51,7 +57,7 @@ Then open a private chat with your bot and send a message.
 | `/start` | Show configuration and help        |
 | `/help`  | Same as /start                     |
 | `/stop`  | Cancel the currently running task  |
-| `/reset` | Clear saved conversation history   |
+| `/reset` | Clear this chat's saved transcript |
 
 ### Service management
 
@@ -82,6 +88,13 @@ See [docs/operations.md](docs/operations.md) for full operational details.
 ## Project instructions
 
 Place a `TOPAGENT.md` file in your workspace root to give the agent project-specific guidance. The agent reads it automatically at the start of each task.
+
+Workspace memory is separate from `TOPAGENT.md`:
+
+- `TOPAGENT.md` is for always-on project instructions
+- `.topagent/MEMORY.md` is a tiny durable memory index
+- `.topagent/topics/` holds compact topic notes loaded only when the task matches them
+- `.topagent/telegram-history/` stores searchable per-chat transcript evidence
 
 ## Troubleshooting
 

@@ -10,7 +10,7 @@ It uses an LLM (via OpenRouter) to decide what to do at each step. The agent loo
 
 **One-shot CLI**: Run `topagent "your task"` from a repository. The agent works through the task and prints a final result. Suitable for single tasks like summarization, refactoring, or code review.
 
-**Telegram bot**: Run `topagent install` to set up a background service. Send tasks to the bot from your phone or desktop. The bot maintains per-chat conversation history, so follow-up messages have context from previous exchanges.
+**Telegram bot**: Run `topagent install` to set up a background service. Send tasks to the bot from your phone or desktop. The bot keeps a thin workspace memory index plus a per-chat saved transcript, then retrieves only targeted evidence instead of replaying the whole transcript into model context.
 
 **Foreground Telegram** (debugging): Run `topagent telegram` to start the bot in the foreground with log output visible in the terminal. Useful for debugging bot behavior.
 
@@ -21,7 +21,9 @@ It uses an LLM (via OpenRouter) to decide what to do at each step. The agent loo
 - Use git: status, diff, branch, add, commit
 - Plan multi-step tasks before executing them
 - Load project-specific instructions from `TOPAGENT.md`
-- Maintain conversation history across Telegram sessions
+- Keep a tiny workspace memory index in `.topagent/MEMORY.md`
+- Load compact topic notes from `.topagent/topics/` only when relevant
+- Search prior Telegram transcripts as evidence without restoring them wholesale
 - Create and manage custom tools (tool genesis)
 - Save reusable plans and lessons to `.topagent/`
 
@@ -39,6 +41,7 @@ It uses an LLM (via OpenRouter) to decide what to do at each step. The agent loo
 3. **Verifiable output**: the agent reports what files changed and includes diff evidence
 4. **Secret safety**: API keys and tokens are redacted from tool output and replies
 5. **Minimal dependencies**: two Rust crates, OpenRouter API access, optional bubblewrap
+6. **Index-first memory**: durable memory stays small, topic files are lazy, transcripts are evidence
 
 ## Agent behavior
 
@@ -78,5 +81,5 @@ Custom tools can be created via the tool genesis system and are stored in `.topa
 - **Platform**: Linux only; systemd required for the background service
 - **Workspace**: one workspace per process; the agent cannot operate across repositories
 - **Network**: bash commands run with network disabled when bubblewrap is available
-- **Context**: when conversation exceeds 100 messages, the oldest half is dropped to stay within LLM context limits
+- **Context**: TopAgent no longer restores whole Telegram transcripts by default; it injects a small memory briefing and only targeted transcript snippets when relevant
 - **Model**: default model is `minimax/minimax-m2.7`; quality depends on the model used
