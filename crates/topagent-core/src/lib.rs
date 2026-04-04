@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod approval;
 pub mod behavior;
 pub mod cancel;
 pub mod channel;
@@ -26,6 +27,11 @@ pub mod tool_spec;
 pub mod tools;
 
 pub use agent::{Agent, ExecutionStage};
+pub use approval::{
+    ApprovalCheck, ApprovalEnforcement, ApprovalEntry, ApprovalMailbox, ApprovalMailboxMode,
+    ApprovalPolicy, ApprovalRequest, ApprovalRequestDraft, ApprovalResolveError, ApprovalState,
+    ApprovalTriggerKind, ApprovalTriggerRule,
+};
 pub use behavior::{BashCommandClass, BehaviorContract, BehaviorPromptContext};
 pub use cancel::CancellationToken;
 pub use channel::telegram::{ChannelError, TelegramAdapter, POLL_TIMEOUT_SECS};

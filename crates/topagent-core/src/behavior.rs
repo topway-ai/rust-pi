@@ -1,3 +1,8 @@
+use crate::approval::{
+    ApprovalEnforcement, ApprovalPolicy, ApprovalRequestDraft, ApprovalTriggerKind,
+    ApprovalTriggerRule,
+};
+use crate::command_exec::CommandSandboxPolicy;
 use crate::external::ExternalToolEffect;
 use crate::plan::{Plan, TaskMode};
 use crate::runtime::RuntimeOptions;
@@ -123,34 +128,6 @@ pub struct MutationPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApprovalPolicy {
-    pub mailbox_available: bool,
-    pub triggers: &'static [ApprovalTriggerRule],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ApprovalTriggerRule {
-    pub kind: ApprovalTriggerKind,
-    pub label: &'static str,
-    pub enforcement: ApprovalEnforcement,
-    pub rationale: &'static str,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalTriggerKind {
-    GitCommit,
-    DestructiveShellMutation,
-    HostExternalExecution,
-    GeneratedToolDeletion,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalEnforcement {
-    AdvisoryOnly,
-    RequiredWhenAvailable,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputPolicy {
     pub concise_final_response: bool,
     pub avoid_replaying_raw_tool_output: bool,
@@ -167,6 +144,10 @@ pub struct MemoryPolicy {
     pub durable_write_tools: &'static [&'static str],
     pub current_state_wins: bool,
     pub never_store: &'static [&'static str],
+    pub keep_index_tiny: bool,
+    pub index_is_pointer_only: bool,
+    pub topic_file_relative_dir: &'static str,
+    pub index_entry_format: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +182,7 @@ pub struct BehaviorPromptContext<'a> {
     pub current_plan: Option<&'a Plan>,
     pub generated_tool_warnings: &'a [String],
     pub planning_required_now: bool,
+    pub approval_mailbox_available: bool,
 }
 
 pub struct PreExecutionState {
@@ -431,6 +413,11 @@ Use the update_plan tool to create a plan with concrete steps, then execute it."
                     "transient plans",
                     "secrets",
                 ],
+                keep_index_tiny: true,
+                index_is_pointer_only: true,
+                topic_file_relative_dir: "topics",
+                index_entry_format:
+                    "- topic: <name> | file: topics/<name>.md | status: verified|tentative|stale | tags: tag1, tag2 | note: short pointer",
             },
             generated_tools: GeneratedToolPolicy {
                 authoring_enabled: options.enable_generated_tool_authoring,
@@ -558,6 +545,92 @@ Use the update_plan tool to create a plan with concrete steps, then execute it."
         BashCommandClass::MutationRisk
     }
 
+    pub fn approval_request(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        bash_command: Option<&str>,
+        external_effect: Option<ExternalToolEffect>,
+        external_sandbox: Option<CommandSandboxPolicy>,
+    ) -> Option<ApprovalRequestDraft> {
+        if tool_name == "git_commit" {
+            let message = args
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("<missing commit message>");
+            return self.build_approval_request(
+                ApprovalTriggerKind::GitCommit,
+                format!("git commit: {}", Self::compact_action_text(message, 80)),
+                format!("git_commit(message={message:?})"),
+                "Creates a new git commit in the current workspace repository.".to_string(),
+                "Staged changes become a durable repo milestone.".to_string(),
+                Some("Use git revert or git reset if the commit needs to be undone.".to_string()),
+            );
+        }
+
+        if tool_name == "bash" {
+            let command = bash_command?;
+            if self.classify_bash_command(command) != BashCommandClass::MutationRisk {
+                return None;
+            }
+
+            return self.build_approval_request(
+                ApprovalTriggerKind::DestructiveShellMutation,
+                format!(
+                    "bash mutation: {}",
+                    Self::compact_action_text(command.trim(), 90)
+                ),
+                command.trim().to_string(),
+                "May create, overwrite, move, or delete files outside structured edit tools."
+                    .to_string(),
+                "Runs a filesystem-changing shell command directly in the workspace.".to_string(),
+                Some(
+                    "Rollback depends on the command; inspect git diff or restore affected files manually."
+                        .to_string(),
+                ),
+            );
+        }
+
+        if external_sandbox == Some(CommandSandboxPolicy::Host) {
+            let effect = match external_effect.unwrap_or(ExternalToolEffect::ReadOnly) {
+                ExternalToolEffect::ReadOnly => {
+                    "Runs a host-scoped external tool outside the workspace sandbox."
+                }
+                ExternalToolEffect::VerificationOnly => {
+                    "Runs a host-scoped verification tool outside the workspace sandbox."
+                }
+                ExternalToolEffect::ExecutionStarted => {
+                    "Runs a host-scoped execution tool outside the workspace sandbox."
+                }
+            };
+            return self.build_approval_request(
+                ApprovalTriggerKind::HostExternalExecution,
+                format!("host external tool: {tool_name}"),
+                format!("{tool_name}({})", Self::compact_json(args)),
+                "May reach beyond the workspace sandbox and affect host-visible state.".to_string(),
+                effect.to_string(),
+                None,
+            );
+        }
+
+        if tool_name == "delete_generated_tool" {
+            let name = args
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("<missing tool name>");
+            return self.build_approval_request(
+                ApprovalTriggerKind::GeneratedToolDeletion,
+                format!("delete generated tool: {name}"),
+                format!("delete_generated_tool(name={name:?})"),
+                "Removes a workspace-local tool from .topagent/tools/.".to_string(),
+                "Deletes the generated tool until it is recreated.".to_string(),
+                Some("Use create_tool or repair_tool to restore the tool later.".to_string()),
+            );
+        }
+
+        None
+    }
+
     pub fn is_verification_command(&self, cmd: &str) -> bool {
         let lower = cmd.to_lowercase();
 
@@ -607,6 +680,45 @@ Use the update_plan tool to create a plan with concrete steps, then execute it."
 
     pub fn mutates_generated_tool_surface(&self, name: &str) -> bool {
         self.mutation.generated_tool_surface_tools.contains(&name)
+    }
+
+    pub fn render_memory_prompt_preamble(&self) -> String {
+        let mut prompt = String::new();
+        if self.memory.loaded_memory_is_advisory {
+            prompt.push_str("Treat every memory item below as a hint, not truth.\n");
+        }
+        if self.memory.current_state_wins {
+            prompt.push_str(
+                "- Re-verify any claim about code, files, runtime behavior, config, service state, or security against the current workspace and tools.\n",
+            );
+            prompt.push_str(
+                "- If memory conflicts with current files or runtime state, current state wins.\n",
+            );
+        }
+        prompt.push_str(
+            "- Do not rely on memory for facts that are cheap to re-derive from the repo.\n",
+        );
+        prompt
+    }
+
+    pub fn render_memory_index_template(&self) -> String {
+        let mut template = String::from("# TopAgent Memory Index\n\n");
+        if self.memory.keep_index_tiny {
+            template.push_str(
+                "Keep this file tiny. Each durable memory entry must stay on one line.\n",
+            );
+        }
+        if self.memory.index_is_pointer_only {
+            template.push_str(
+                "Use this file as an index only. Put richer durable notes in topic files.\n\n",
+            );
+        }
+        template.push_str("Format:\n");
+        template.push_str(self.memory.index_entry_format);
+        template.push_str("\n\nDo not store ");
+        template.push_str(&self.memory.never_store.join(", "));
+        template.push_str(" here.\n");
+        template
     }
 
     pub fn planning_block_message(
@@ -756,7 +868,7 @@ All file paths are relative to this workspace root.\n\n",
         self.render_planning_section(&mut prompt);
         self.render_tool_section(&mut prompt);
         self.render_mutation_section(&mut prompt);
-        self.render_approval_section(&mut prompt);
+        self.render_approval_section(&mut prompt, ctx);
         self.render_output_section(&mut prompt);
         self.render_memory_section(&mut prompt);
         self.render_generated_tool_section(&mut prompt);
@@ -925,13 +1037,13 @@ All file paths are relative to this workspace root.\n\n",
         prompt.push_str("- Never use tools to reveal or relay credentials.\n\n");
     }
 
-    fn render_approval_section(&self, prompt: &mut String) {
+    fn render_approval_section(&self, prompt: &mut String, ctx: &BehaviorPromptContext<'_>) {
         prompt.push_str("## Approval Triggers\n\n");
-        if self.approval.mailbox_available {
+        if ctx.approval_mailbox_available || self.approval.mailbox_available {
             prompt.push_str("- Approval mailbox is available.\n");
         } else {
             prompt.push_str(
-                "- Approval mailbox is not built yet. Treat the following triggers as advisory ask-first rules in chat.\n",
+                "- Approval mailbox is unavailable for this run. If a trigger fires, stop and report that approval is required.\n",
             );
         }
         for rule in self.approval.triggers {
@@ -954,6 +1066,12 @@ All file paths are relative to this workspace root.\n\n",
         prompt.push_str("## Memory Write Rules\n\n");
         prompt.push_str("- Loaded workspace memory is advisory; re-verify against the current repo and runtime state.\n");
         prompt.push_str("- Current workspace state wins over memory when they conflict.\n");
+        if self.memory.keep_index_tiny {
+            prompt.push_str("- Keep durable memory indexes tiny and pointer-oriented.\n");
+        }
+        if self.memory.index_is_pointer_only {
+            prompt.push_str("- Store richer durable notes in topic files instead of the index.\n");
+        }
         prompt.push_str(&format!(
             "- Durable memory writes are limited to: {}\n",
             self.memory.durable_write_tools.join(", ")
@@ -1018,6 +1136,48 @@ All file paths are relative to this workspace root.\n\n",
         }
         prompt.push('\n');
     }
+
+    fn build_approval_request(
+        &self,
+        kind: ApprovalTriggerKind,
+        short_summary: String,
+        exact_action: String,
+        scope_of_impact: String,
+        expected_effect: String,
+        rollback_hint: Option<String>,
+    ) -> Option<ApprovalRequestDraft> {
+        let rule = self
+            .approval
+            .triggers
+            .iter()
+            .find(|rule| rule.kind == kind)?;
+        if rule.enforcement == ApprovalEnforcement::AdvisoryOnly {
+            return None;
+        }
+        Some(ApprovalRequestDraft {
+            action_kind: kind,
+            short_summary,
+            exact_action,
+            reason: rule.rationale.to_string(),
+            scope_of_impact,
+            expected_effect,
+            rollback_hint,
+        })
+    }
+
+    fn compact_action_text(text: &str, limit: usize) -> String {
+        let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if compact.len() <= limit {
+            compact
+        } else {
+            format!("{}...", &compact[..limit.saturating_sub(3)])
+        }
+    }
+
+    fn compact_json(value: &serde_json::Value) -> String {
+        let rendered = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+        Self::compact_action_text(&rendered, 100)
+    }
 }
 
 #[cfg(test)]
@@ -1078,6 +1238,87 @@ mod tests {
     }
 
     #[test]
+    fn test_contract_builds_git_commit_approval_request() {
+        let contract = BehaviorContract::default();
+        let request = contract
+            .approval_request(
+                "git_commit",
+                &serde_json::json!({"message": "ship it"}),
+                None,
+                None,
+                None,
+            )
+            .expect("git commit should require approval");
+
+        assert_eq!(request.action_kind, ApprovalTriggerKind::GitCommit);
+        assert!(request.short_summary.contains("git commit"));
+        assert!(request.exact_action.contains("ship it"));
+    }
+
+    #[test]
+    fn test_contract_builds_host_external_approval_request() {
+        let contract = BehaviorContract::default();
+        let request = contract
+            .approval_request(
+                "deploy_preview",
+                &serde_json::json!({"env": "staging"}),
+                None,
+                Some(ExternalToolEffect::ExecutionStarted),
+                Some(CommandSandboxPolicy::Host),
+            )
+            .expect("host external tools should require approval");
+
+        assert_eq!(
+            request.action_kind,
+            ApprovalTriggerKind::HostExternalExecution
+        );
+        assert!(request.short_summary.contains("deploy_preview"));
+        assert!(request
+            .expected_effect
+            .contains("outside the workspace sandbox"));
+    }
+
+    #[test]
+    fn test_contract_builds_bash_mutation_approval_request() {
+        let contract = BehaviorContract::default();
+        let request = contract
+            .approval_request(
+                "bash",
+                &serde_json::json!({"command": "touch risky.txt"}),
+                Some("touch risky.txt"),
+                None,
+                None,
+            )
+            .expect("mutation-risk bash should require approval");
+
+        assert_eq!(
+            request.action_kind,
+            ApprovalTriggerKind::DestructiveShellMutation
+        );
+        assert!(request.exact_action.contains("touch risky.txt"));
+    }
+
+    #[test]
+    fn test_contract_builds_generated_tool_deletion_approval_request() {
+        let contract = BehaviorContract::default();
+        let request = contract
+            .approval_request(
+                "delete_generated_tool",
+                &serde_json::json!({"name": "cleanup_tool"}),
+                None,
+                None,
+                None,
+            )
+            .expect("generated tool deletion should require approval");
+
+        assert_eq!(
+            request.action_kind,
+            ApprovalTriggerKind::GeneratedToolDeletion
+        );
+        assert!(request.short_summary.contains("cleanup_tool"));
+    }
+
+    #[test]
     fn test_truncation_notice_mentions_preserved_sections() {
         let contract = BehaviorContract::default();
         let notice = contract.build_truncation_notice(15);
@@ -1103,6 +1344,7 @@ mod tests {
             current_plan: Some(&plan),
             generated_tool_warnings: &["broken_tool: missing script.sh".to_string()],
             planning_required_now: true,
+            approval_mailbox_available: true,
         });
 
         assert!(prompt.contains("## Product Identity"));
@@ -1112,5 +1354,15 @@ mod tests {
         assert!(prompt.contains("## Compaction Preservation"));
         assert!(prompt.contains("Current plan"));
         assert!(prompt.contains("broken_tool: missing script.sh"));
+    }
+
+    #[test]
+    fn test_render_memory_index_template_uses_contract_policy() {
+        let contract = BehaviorContract::default();
+        let template = contract.render_memory_index_template();
+
+        assert!(template.contains("Keep this file tiny"));
+        assert!(template.contains("Use this file as an index only"));
+        assert!(template.contains("Do not store transcripts"));
     }
 }

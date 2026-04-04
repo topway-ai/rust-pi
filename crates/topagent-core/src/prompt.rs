@@ -12,5 +12,6 @@ pub fn build_system_prompt(tools: &[ToolSpec], external_tools: &[ToolSpec]) -> S
         current_plan: None,
         generated_tool_warnings: &[],
         planning_required_now: false,
+        approval_mailbox_available: false,
     })
 }

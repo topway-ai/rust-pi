@@ -1,3 +1,4 @@
+use crate::approval::ApprovalMailbox;
 use crate::secrets::SecretRegistry;
 use crate::{cancel::CancellationToken, runtime::RuntimeOptions};
 use std::path::{Component, Path, PathBuf};
@@ -8,6 +9,7 @@ pub struct ExecutionContext {
     cancel_token: Option<CancellationToken>,
     secrets: SecretRegistry,
     memory_context: Option<String>,
+    approval_mailbox: Option<ApprovalMailbox>,
 }
 
 impl ExecutionContext {
@@ -17,6 +19,7 @@ impl ExecutionContext {
             cancel_token: None,
             secrets: SecretRegistry::new(),
             memory_context: None,
+            approval_mailbox: None,
         }
     }
 
@@ -40,12 +43,21 @@ impl ExecutionContext {
         self
     }
 
+    pub fn with_approval_mailbox(mut self, approval_mailbox: ApprovalMailbox) -> Self {
+        self.approval_mailbox = Some(approval_mailbox);
+        self
+    }
+
     pub fn secrets(&self) -> &SecretRegistry {
         &self.secrets
     }
 
     pub fn memory_context(&self) -> Option<&str> {
         self.memory_context.as_deref()
+    }
+
+    pub fn approval_mailbox(&self) -> Option<&ApprovalMailbox> {
+        self.approval_mailbox.as_ref()
     }
 
     pub fn is_cancelled(&self) -> bool {

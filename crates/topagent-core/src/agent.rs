@@ -1,6 +1,8 @@
+use crate::approval::ApprovalCheck;
 use crate::behavior::{
     BashCommandClass, BehaviorContract, BehaviorPromptContext, PreExecutionState,
 };
+use crate::command_exec::CommandSandboxPolicy;
 use crate::context::{ExecutionContext, ToolContext};
 use crate::external::{ExternalToolEffect, ExternalToolRegistry};
 use crate::hooks::HookRegistry;
@@ -515,35 +517,46 @@ impl Agent {
         args: &serde_json::Value,
         bash_args: Option<&serde_json::Value>,
         external_effect: Option<ExternalToolEffect>,
-    ) -> Option<PreflightBlock> {
+        external_sandbox: Option<CommandSandboxPolicy>,
+    ) -> Result<Option<PreflightBlock>> {
         let tool_ctx = ToolContext::new(ctx, &self.options);
         if let Some(hooks) = self.hooks.get(name) {
             if !hooks.run_pre_hooks(name, args, &tool_ctx) {
-                return Some(PreflightBlock {
+                return Ok(Some(PreflightBlock {
                     message: "error: tool blocked by pre-hook".into(),
                     is_planning_block: false,
-                });
+                }));
             }
         }
 
         if let Some(block_msg) = self.check_planning_gate(name, bash_args, external_effect) {
             self.emit_progress(Self::blocked_progress(&block_msg));
-            return Some(PreflightBlock {
+            return Ok(Some(PreflightBlock {
                 message: block_msg,
                 is_planning_block: true,
-            });
+            }));
         }
         if let Some(block_msg) =
             self.check_pre_execution_verification_gate(name, bash_args, external_effect)
         {
             self.emit_progress(Self::blocked_progress(&block_msg));
-            return Some(PreflightBlock {
+            return Ok(Some(PreflightBlock {
                 message: block_msg,
                 is_planning_block: false,
-            });
+            }));
+        }
+        if let Some(block) = self.check_approval_gate(
+            ctx,
+            name,
+            args,
+            bash_args,
+            external_effect,
+            external_sandbox,
+        )? {
+            return Ok(Some(block));
         }
 
-        None
+        Ok(None)
     }
 
     /// Execute a single tool call (internal or external), updating session,
@@ -578,7 +591,7 @@ impl Agent {
 
         // ── Preflight: hooks + gates ──
         let bash_args = if name == "bash" { Some(&args) } else { None };
-        if let Some(block) = self.run_preflight(ctx, &name, &args, bash_args, None) {
+        if let Some(block) = self.run_preflight(ctx, &name, &args, bash_args, None, None)? {
             self.record_tool_result(id, name, args, block.message);
             if block.is_planning_block {
                 self.note_planning_block(ctx, instruction)?;
@@ -686,9 +699,17 @@ impl Agent {
         args: serde_json::Value,
     ) -> Result<()> {
         let external_effect = self.external_tools.get(&name).unwrap().effect();
+        let external_sandbox = self.external_tools.get(&name).unwrap().sandbox_policy();
 
         // ── Preflight: hooks + gates ──
-        if let Some(block) = self.run_preflight(ctx, &name, &args, None, Some(external_effect)) {
+        if let Some(block) = self.run_preflight(
+            ctx,
+            &name,
+            &args,
+            None,
+            Some(external_effect),
+            Some(external_sandbox),
+        )? {
             self.record_tool_result(id, name, args, block.message);
             if block.is_planning_block {
                 self.note_planning_block(ctx, instruction)?;
@@ -821,6 +842,58 @@ impl Agent {
                 task_mode: self.task_mode,
             },
         )
+    }
+
+    fn check_approval_gate(
+        &self,
+        ctx: &ExecutionContext,
+        tool_name: &str,
+        args: &serde_json::Value,
+        bash_args: Option<&serde_json::Value>,
+        external_effect: Option<ExternalToolEffect>,
+        external_sandbox: Option<CommandSandboxPolicy>,
+    ) -> Result<Option<PreflightBlock>> {
+        let Some(mailbox) = ctx.approval_mailbox() else {
+            return Ok(None);
+        };
+
+        let bash_command = bash_args
+            .and_then(|args| args.get("command"))
+            .and_then(|value| value.as_str());
+        let Some(request) = self.behavior.approval_request(
+            tool_name,
+            args,
+            bash_command,
+            external_effect,
+            external_sandbox,
+        ) else {
+            return Ok(None);
+        };
+
+        let blocked_message = format!("approval required for {}", request.short_summary);
+        self.emit_progress(Self::blocked_progress(&blocked_message));
+        match mailbox.request_decision(request, ctx.cancel_token()) {
+            ApprovalCheck::Approved(_) => Ok(None),
+            ApprovalCheck::Pending(entry) => Err(Error::ApprovalRequired(Box::new(entry.request))),
+            ApprovalCheck::Denied(entry) => Ok(Some(PreflightBlock {
+                message: format!("error: approval denied for {}", entry.request.short_summary),
+                is_planning_block: false,
+            })),
+            ApprovalCheck::Expired(entry) => Ok(Some(PreflightBlock {
+                message: format!(
+                    "error: approval expired for {}",
+                    entry.request.short_summary
+                ),
+                is_planning_block: false,
+            })),
+            ApprovalCheck::Superseded(entry) => Ok(Some(PreflightBlock {
+                message: format!(
+                    "error: approval superseded for {}",
+                    entry.request.short_summary
+                ),
+                is_planning_block: false,
+            })),
+        }
     }
 
     fn compute_file_hash(path: &Path) -> Option<String> {
@@ -1226,6 +1299,7 @@ impl Agent {
             current_plan,
             generated_tool_warnings: &self.generated_tool_warnings,
             planning_required_now: self.planning_gate_active && !plan_exists,
+            approval_mailbox_available: ctx.approval_mailbox().is_some(),
         }))
     }
 
@@ -1390,12 +1464,14 @@ fn extract_exit_code(result: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{extract_exit_code, Agent};
+    use crate::approval::{ApprovalMailbox, ApprovalMailboxMode, ApprovalTriggerKind};
     use crate::context::ExecutionContext;
     use crate::provider::{ProviderResponse, ScriptedProvider};
     use crate::runtime::RuntimeOptions;
     use crate::tools::default_tools;
-    use crate::Message;
+    use crate::{Error, Message};
     use std::fs;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn create_temp_crate() -> (TempDir, ExecutionContext) {
@@ -1489,6 +1565,37 @@ path = "src/lib.rs"
             serde_json::to_string(&entries).unwrap(),
         )
         .unwrap();
+    }
+
+    fn run_git(workspace: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn create_temp_git_repo() -> (TempDir, ExecutionContext) {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().to_path_buf();
+        fs::write(temp.path().join("tracked.txt"), "before\n").unwrap();
+        run_git(temp.path(), &["init"]);
+        run_git(
+            temp.path(),
+            &["config", "user.email", "topagent@example.com"],
+        );
+        run_git(temp.path(), &["config", "user.name", "TopAgent"]);
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
+        fs::write(temp.path().join("tracked.txt"), "after\n").unwrap();
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        (temp, ExecutionContext::new(root))
     }
 
     #[test]
@@ -1710,5 +1817,118 @@ path = "src/lib.rs"
 
         assert_eq!(result.matches("`cargo check --offline`").count(), 1);
         assert!(result.contains("done after real execution"));
+    }
+
+    #[test]
+    fn test_git_commit_requires_approval_and_does_not_execute_silently() {
+        let (_temp, ctx) = create_temp_git_repo();
+        let mailbox = ApprovalMailbox::new(ApprovalMailboxMode::Immediate);
+        let ctx = ctx.with_approval_mailbox(mailbox.clone());
+        let provider = ScriptedProvider::new(vec![tool_call(
+            "commit",
+            "git_commit",
+            serde_json::json!({"message": "ship it"}),
+        )]);
+        let mut agent = Agent::with_options(
+            Box::new(provider),
+            default_tools().into_inner(),
+            RuntimeOptions::default(),
+        );
+
+        let result = agent.run(&ctx, "commit the staged change");
+        let request = match result {
+            Err(Error::ApprovalRequired(request)) => request,
+            other => panic!("expected approval-required error, got {other:?}"),
+        };
+
+        assert_eq!(request.action_kind, ApprovalTriggerKind::GitCommit);
+        let commit_count = std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&ctx.workspace_root)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&commit_count.stdout).trim(), "1");
+        assert_eq!(mailbox.pending().len(), 1);
+    }
+
+    #[test]
+    fn test_host_external_execution_requires_approval_and_does_not_run() {
+        let (temp, ctx) = create_temp_crate();
+        write_workspace_external_tools_json(
+            &temp,
+            serde_json::json!([
+                {
+                    "name": "host_touch",
+                    "description": "create a host-side marker file",
+                    "command": "bash",
+                    "argv_template": ["-lc", "touch host-risk.txt"],
+                    "sandbox": "host",
+                    "effect": "execution_started"
+                }
+            ]),
+        );
+
+        let mailbox = ApprovalMailbox::new(ApprovalMailboxMode::Immediate);
+        let ctx = ctx.with_approval_mailbox(mailbox.clone());
+        let provider =
+            ScriptedProvider::new(vec![tool_call("host", "host_touch", serde_json::json!({}))]);
+        let mut agent = Agent::with_options(
+            Box::new(provider),
+            default_tools().into_inner(),
+            RuntimeOptions::default(),
+        );
+
+        let result = agent.run(&ctx, "run the host helper");
+        let request = match result {
+            Err(Error::ApprovalRequired(request)) => request,
+            other => panic!("expected approval-required error, got {other:?}"),
+        };
+
+        assert_eq!(
+            request.action_kind,
+            ApprovalTriggerKind::HostExternalExecution
+        );
+        assert!(!ctx.workspace_root.join("host-risk.txt").exists());
+        assert_eq!(mailbox.pending().len(), 1);
+    }
+
+    #[test]
+    fn test_approved_git_commit_executes_through_waiting_mailbox() {
+        let (_temp, ctx) = create_temp_git_repo();
+        let mailbox = ApprovalMailbox::new(ApprovalMailboxMode::Wait);
+        let mailbox_for_notifier = mailbox.clone();
+        mailbox.set_notifier(Arc::new(move |request| {
+            mailbox_for_notifier
+                .approve(&request.id, Some("approved in test".to_string()))
+                .unwrap();
+        }));
+        let ctx = ctx.with_approval_mailbox(mailbox.clone());
+        let provider = ScriptedProvider::new(vec![
+            tool_call(
+                "commit",
+                "git_commit",
+                serde_json::json!({"message": "ship it"}),
+            ),
+            assistant_message("commit complete"),
+        ]);
+        let mut agent = Agent::with_options(
+            Box::new(provider),
+            default_tools().into_inner(),
+            RuntimeOptions::default(),
+        );
+
+        let result = agent.run(&ctx, "commit the staged change").unwrap();
+
+        assert!(result.contains("commit complete"));
+        let commit_count = std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&ctx.workspace_root)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&commit_count.stdout).trim(), "2");
+        assert_eq!(
+            mailbox.get("apr-1").unwrap().state,
+            crate::approval::ApprovalState::Approved
+        );
     }
 }
