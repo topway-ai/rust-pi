@@ -1,6 +1,7 @@
 mod bash;
 mod edit;
 mod git;
+mod operator_preference;
 mod planning;
 mod read;
 mod save_lesson;
@@ -10,6 +11,7 @@ mod write;
 pub use bash::BashTool;
 pub use edit::EditTool;
 pub use git::{GitAddTool, GitBranchTool, GitCommitTool, GitDiffTool, GitStatusTool};
+pub use operator_preference::ManageOperatorPreferenceTool;
 pub use planning::UpdatePlanTool;
 pub use read::ReadTool;
 pub use save_lesson::SaveLessonTool;

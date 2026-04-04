@@ -17,7 +17,9 @@ use crate::task_result::{TaskEvidence, TaskResult, VerificationCommand};
 use crate::tool_genesis::{
     CreateToolTool, DeleteGeneratedToolTool, ListGeneratedToolsTool, RepairToolTool, ToolGenesis,
 };
-use crate::tools::{SaveLessonTool, SavePlanTool, Tool, ToolRegistry, UpdatePlanTool};
+use crate::tools::{
+    ManageOperatorPreferenceTool, SaveLessonTool, SavePlanTool, Tool, ToolRegistry, UpdatePlanTool,
+};
 use crate::{Error, Message, Provider, ProviderResponse, Result, ToolSpec};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -137,6 +139,7 @@ impl Agent {
         registry.add(Box::new(save_plan_tool));
 
         registry.add(Box::new(SaveLessonTool::new()));
+        registry.add(Box::new(ManageOperatorPreferenceTool::new()));
 
         if behavior.generated_tools.authoring_enabled {
             registry.add(Box::new(CreateToolTool::new()));

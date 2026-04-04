@@ -312,7 +312,11 @@ Use the update_plan tool to create a plan with concrete steps, then execute it."
             tools: ToolPolicy {
                 repo_awareness_tools: &["git_status", "git_branch", "git_diff"],
                 planning_tools: &["update_plan", "save_plan"],
-                memory_write_tools: &["save_plan", "save_lesson"],
+                memory_write_tools: &[
+                    "save_plan",
+                    "save_lesson",
+                    "manage_operator_preference",
+                ],
                 generated_tool_authoring_tools: &[
                     "create_tool",
                     "repair_tool",
@@ -432,7 +436,11 @@ Use the update_plan tool to create a plan with concrete steps, then execute it."
             },
             memory: MemoryPolicy {
                 loaded_memory_is_advisory: true,
-                durable_write_tools: &["save_plan", "save_lesson"],
+                durable_write_tools: &[
+                    "save_plan",
+                    "save_lesson",
+                    "manage_operator_preference",
+                ],
                 current_state_wins: true,
                 never_store: &[
                     "transcripts",
@@ -1342,6 +1350,17 @@ mod tests {
         assert!(contract.generated_tools.authoring_enabled);
         assert_eq!(contract.compaction.max_messages_before_truncation, 42);
         assert_eq!(contract.compaction.micro_trigger_messages, 21);
+    }
+
+    #[test]
+    fn test_operator_preference_tool_is_classified_as_memory_write() {
+        let contract = BehaviorContract::default();
+
+        assert!(contract.is_memory_write_tool("manage_operator_preference"));
+        assert!(contract
+            .memory
+            .durable_write_tools
+            .contains(&"manage_operator_preference"));
     }
 
     #[test]
