@@ -230,6 +230,7 @@ fn test_operations_docs_explain_external_tool_sandbox_rollout() {
     let operations = std::fs::read_to_string(repo_root.join("docs/operations.md")).unwrap();
 
     assert!(operations.contains("\"sandbox\": \"workspace\""));
-    assert!(operations.contains("compatibility default of host execution"));
-    assert!(operations.contains("Generated tools do not have this toggle"));
+    assert!(operations.contains("\"sandbox\": \"host\""));
+    assert!(operations.contains("If `sandbox` is omitted, TopAgent rejects"));
+    assert!(operations.contains("only supported workspace external-tool config file"));
 }

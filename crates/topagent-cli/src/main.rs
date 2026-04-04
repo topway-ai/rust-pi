@@ -76,7 +76,6 @@ struct Cli {
 
     #[arg(
         long = "workspace",
-        alias = "cwd",
         global = true,
         help = "Workspace directory override"
     )]
@@ -93,7 +92,6 @@ struct Cli {
 
     #[arg(
         long = "tool-authoring",
-        alias = "generated-tool-authoring",
         global = true,
         value_enum,
         help = "Enable or disable generated-tool authoring tools for this run or installed service"

@@ -2,7 +2,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use tempfile::TempDir;
 use topagent_core::{
     context::ExecutionContext,
-    plan::should_use_plan,
     tools::{BashTool, EditTool, ReadTool, Tool, WriteTool},
     Agent, Content, Message, Provider, ProviderResponse, Role, RuntimeOptions,
 };
@@ -181,22 +180,6 @@ fn test_plan_replacement_clears_old_items() {
 }
 
 #[test]
-fn test_should_use_plan_policy_simple() {
-    assert!(!should_use_plan("read file foo.txt"));
-    assert!(!should_use_plan("what is the project about"));
-    assert!(!should_use_plan("show me the directory"));
-}
-
-#[test]
-fn test_should_use_plan_policy_complex() {
-    // Short multi-step instructions are now classified by the LLM (ambiguous
-    // to heuristics). The heuristic fallback defaults to false. Only broad
-    // scope and explicit plan requests are definitively plan-required.
-    assert!(should_use_plan("make a plan to refactor the codebase"));
-    assert!(should_use_plan("refactor the entire repository"));
-}
-
-#[test]
 fn test_plan_clearing_removes_from_context() {
     let (ctx, _temp) = make_test_context();
     let recorded = Arc::new(Mutex::new(Vec::new()));
@@ -274,5 +257,6 @@ fn test_planning_uses_canonical_in_progress() {
     let system_prompt = recorded_data.iter().find(|m| m.role == Role::System);
     assert!(system_prompt.is_some());
     let text = get_text_from_message(system_prompt.unwrap()).unwrap();
-    assert!(!text.contains("inprogress"), "old alias should not leak");
+    assert!(text.contains("Current plan:"));
+    assert!(text.contains("[>] 1 - Task 2"));
 }

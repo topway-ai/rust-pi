@@ -37,7 +37,7 @@ The engine crate. No CLI or Telegram logic -- just the agent loop, tools, and pr
 | `plan` | Plan struct, TodoItem, task modes |
 | `project` | Load `TOPAGENT.md` project instructions |
 | `prompt` | System prompt construction |
-| `external` | Workspace external tool registry loaded from `.topagent/external-tools.json` (and legacy `commands.json`) |
+| `external` | Workspace external tool registry loaded from `.topagent/external-tools.json` |
 | `hooks` | Pre/post tool hooks |
 | `channel/` | Telegram adapter and channel error types |
 | `cancel` | CancellationToken for graceful shutdown |
@@ -139,7 +139,7 @@ Secrets are protected at multiple layers:
    - read-write access only to the workspace and `/tmp`
    - network access disabled (`--unshare-net`)
 
-Generated tools use the same workspace sandbox policy as bash. Workspace external tools use a centralized sandbox policy too, but they default to host execution for compatibility unless their `.topagent/external-tools.json` entry explicitly sets `"sandbox": "workspace"`.
+Generated tools use the same workspace sandbox policy as bash. Workspace external tools use the same centralized sandbox policy model, and every entry in `.topagent/external-tools.json` must declare its intent explicitly with `"sandbox": "workspace"` or `"sandbox": "host"`.
 
 5. **Path validation**: file tools reject absolute paths and parent directory traversal (`../`)
 

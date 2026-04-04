@@ -698,8 +698,8 @@ fn test_agent_loads_external_tools_from_workspace_state_dir() {
     write_workspace_external_tools(
         &temp,
         r#"[
-            {"name": "greet", "description": "Say hello", "command": "echo", "args_template": "hello {name}"},
-            {"name": "version", "description": "Get version", "command": "echo", "args_template": "v1.0.0"}
+            {"name": "greet", "description": "Say hello", "command": "echo", "argv_template": ["hello", "{name}"], "sandbox": "host"},
+            {"name": "version", "description": "Get version", "command": "echo", "argv_template": ["v1.0.0"], "sandbox": "workspace"}
         ]"#,
     );
 
@@ -895,36 +895,6 @@ fn test_generated_tool_is_usable_without_waiting_for_next_run() {
 }
 
 #[test]
-fn test_agent_legacy_commands_json_is_still_loaded() {
-    let temp = TempDir::new().unwrap();
-    std::fs::write(
-        temp.path().join("commands.json"),
-        r#"[{"name": "legacy_tool", "description": "Legacy tool", "command": "echo", "argv_template": ["hello"]}]"#,
-    )
-    .unwrap();
-
-    let root = temp.path().to_path_buf();
-    let ctx = ExecutionContext::new(root);
-
-    struct TestProvider;
-    impl Provider for TestProvider {
-        fn complete(
-            &self,
-            _messages: &[Message],
-            _route: &topagent_core::ModelRoute,
-        ) -> topagent_core::Result<ProviderResponse> {
-            Ok(ProviderResponse::Message(Message::assistant("done")))
-        }
-    }
-
-    let mut agent = Agent::new(Box::new(TestProvider), make_tools());
-    let result = agent.run(&ctx, "test");
-
-    assert!(result.is_ok());
-    assert!(agent.external_tools().get("legacy_tool").is_some());
-}
-
-#[test]
 fn test_agent_external_tools_file_invalid_fails() {
     let temp = TempDir::new().unwrap();
     write_workspace_external_tools(&temp, "invalid json {");
@@ -947,6 +917,38 @@ fn test_agent_external_tools_file_invalid_fails() {
     let result = agent.run(&ctx, "test");
 
     assert!(result.is_err());
+}
+
+#[test]
+fn test_agent_external_tools_file_missing_sandbox_fails() {
+    let temp = TempDir::new().unwrap();
+    write_workspace_external_tools(
+        &temp,
+        r#"[{"name": "broken", "description": "Broken tool", "command": "echo", "argv_template": ["hello"]}]"#,
+    );
+
+    let root = temp.path().to_path_buf();
+    let ctx = ExecutionContext::new(root);
+
+    struct TestProvider;
+    impl Provider for TestProvider {
+        fn complete(
+            &self,
+            _messages: &[Message],
+            _route: &topagent_core::ModelRoute,
+        ) -> topagent_core::Result<ProviderResponse> {
+            Ok(ProviderResponse::Message(Message::assistant("done")))
+        }
+    }
+
+    let mut agent = Agent::new(Box::new(TestProvider), make_tools());
+    let result = agent.run(&ctx, "test");
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("missing field `sandbox`"));
 }
 
 #[test]
@@ -1961,7 +1963,7 @@ fn test_external_tool_blocked_before_plan() {
     let temp = tempfile::TempDir::new().unwrap();
     write_workspace_external_tools(
         &temp,
-        r#"[{"name": "my_tool", "description": "test", "command": "echo", "argv_template": ["hello"]}]"#,
+        r#"[{"name": "my_tool", "description": "test", "command": "echo", "argv_template": ["hello"], "sandbox": "host"}]"#,
     );
     std::fs::write(temp.path().join("test.txt"), "content").unwrap();
 
@@ -2163,7 +2165,7 @@ fn test_external_tool_mutation_tracked() {
     // Create external tool that touches a file
     write_workspace_external_tools(
         &temp,
-        r#"[{"name": "create_file", "description": "Create a file", "command": "touch", "argv_template": ["{filename}"]}]"#,
+        r#"[{"name": "create_file", "description": "Create a file", "command": "touch", "argv_template": ["{filename}"], "sandbox": "host"}]"#,
     );
 
     let root = temp.path().to_path_buf();
@@ -2414,7 +2416,7 @@ fn test_agent_syncs_internal_and_external_tools_to_provider() {
     let (ctx, temp) = make_test_context();
     write_workspace_external_tools(
         &temp,
-        r#"[{"name": "workspace_helper", "description": "workspace helper", "command": "echo", "argv_template": ["{target}"]}]"#,
+        r#"[{"name": "workspace_helper", "description": "workspace helper", "command": "echo", "argv_template": ["{target}"], "sandbox": "host"}]"#,
     );
 
     let provider = RecordingProvider::new(ProviderResponse::Message(Message::assistant("done")));

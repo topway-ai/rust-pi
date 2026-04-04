@@ -22,29 +22,23 @@ pub struct ExternalToolResult {
     pub effect: ExternalToolEffect,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ExternalToolConfig {
     pub name: String,
     pub description: String,
     pub command: String,
-    #[serde(default)]
-    pub argv_template: Option<Vec<String>>,
-    #[serde(default)]
+    pub argv_template: Vec<String>,
     pub sandbox: CommandSandboxPolicy,
     #[serde(default)]
     pub effect: ExternalToolEffect,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct RawExternalToolConfig {
+struct WorkspaceExternalToolConfig {
     name: String,
     description: String,
     command: String,
-    #[serde(default)]
-    argv_template: Option<Vec<String>>,
-    #[serde(default)]
-    args_template: Option<String>,
-    #[serde(default)]
+    argv_template: Vec<String>,
     sandbox: CommandSandboxPolicy,
     #[serde(default)]
     effect: ExternalToolEffect,
@@ -63,7 +57,7 @@ impl ExternalTool {
                 name: name.to_string(),
                 description: description.to_string(),
                 command: command.to_string(),
-                argv_template: None,
+                argv_template: Vec::new(),
                 sandbox: CommandSandboxPolicy::Host,
                 effect: ExternalToolEffect::ReadOnly,
             },
@@ -91,7 +85,7 @@ impl ExternalTool {
     }
 
     pub fn with_argv_template(mut self, argv: Vec<String>) -> Self {
-        self.config.argv_template = Some(argv);
+        self.config.argv_template = argv;
         self
     }
 
@@ -126,15 +120,8 @@ impl ExternalTool {
     }
 
     fn from_config(config: ExternalToolConfig) -> Result<Self> {
-        let argv_template = config.argv_template.clone().ok_or_else(|| {
-            Error::InvalidInput(format!(
-                "external tool '{}' is missing argv_template",
-                config.name
-            ))
-        })?;
-
         Ok(Self {
-            input_schema: build_input_schema_from_argv_template(&argv_template),
+            input_schema: build_input_schema_from_argv_template(&config.argv_template),
             config,
         })
     }
@@ -144,13 +131,8 @@ impl ExternalTool {
         args: &serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ExternalToolResult> {
-        let argv_template = self.config.argv_template.as_ref().ok_or_else(|| {
-            Error::InvalidInput(format!(
-                "external tool '{}' has no argv_template configured",
-                self.config.name
-            ))
-        })?;
-        let resolved_argv = resolve_argv_template(argv_template, args, &self.config.name)?;
+        let resolved_argv =
+            resolve_argv_template(&self.config.argv_template, args, &self.config.name)?;
 
         let display_name = format!("external tool '{}'", self.config.name);
         let output = run_command(
@@ -214,11 +196,12 @@ impl ExternalToolRegistry {
     }
 
     pub fn load_from_str(&mut self, content: &str) -> Result<()> {
-        let configs: Vec<RawExternalToolConfig> = serde_json::from_str(content).map_err(|e| {
-            Error::InvalidInput(format!("failed to parse external tools JSON: {}", e))
-        })?;
+        let configs: Vec<WorkspaceExternalToolConfig> =
+            serde_json::from_str(content).map_err(|e| {
+                Error::InvalidInput(format!("failed to parse external tools JSON: {}", e))
+            })?;
         for config in configs {
-            let tool = ExternalTool::from_config(config.into_external_tool_config()?)?;
+            let tool = ExternalTool::from_config(config.into_external_tool_config())?;
             self.register(tool);
         }
         Ok(())
@@ -231,30 +214,16 @@ impl Default for ExternalToolRegistry {
     }
 }
 
-impl RawExternalToolConfig {
-    fn into_external_tool_config(self) -> Result<ExternalToolConfig> {
-        let argv_template = match (self.argv_template, self.args_template) {
-            (Some(argv_template), _) => Some(argv_template),
-            (None, Some(args_template)) => {
-                let parsed = shlex::split(&args_template).ok_or_else(|| {
-                    Error::InvalidInput(format!(
-                        "failed to parse legacy args_template for external tool '{}'",
-                        self.name
-                    ))
-                })?;
-                Some(parsed)
-            }
-            (None, None) => None,
-        };
-
-        Ok(ExternalToolConfig {
+impl WorkspaceExternalToolConfig {
+    fn into_external_tool_config(self) -> ExternalToolConfig {
+        ExternalToolConfig {
             name: self.name,
             description: self.description,
             command: self.command,
-            argv_template,
+            argv_template: self.argv_template,
             sandbox: self.sandbox,
             effect: self.effect,
-        })
+        }
     }
 }
 
@@ -481,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn test_external_tool_no_argv_template_fails() {
+    fn test_external_tool_empty_argv_template_runs_without_inputs() {
         let tool = ExternalTool::new("echo", "echo tool", "echo");
 
         let temp = TempDir::new().unwrap();
@@ -489,9 +458,7 @@ mod tests {
         let runtime = RuntimeOptions::default();
         let ctx = ToolContext::new(&exec, &runtime);
         let result = tool.execute(&serde_json::json!({}), &ctx);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("no argv_template"));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -508,8 +475,8 @@ mod tests {
     fn test_external_tool_registry_load_from_str() {
         let mut registry = ExternalToolRegistry::new();
         let json = r#"[
-            {"name": "tool1", "description": "first tool", "command": "echo", "argv_template": []},
-            {"name": "tool2", "description": "second tool", "command": "ls", "argv_template": ["{path}", "-la"], "effect": "execution_started"}
+            {"name": "tool1", "description": "first tool", "command": "echo", "argv_template": ["hello"], "sandbox": "host"},
+            {"name": "tool2", "description": "second tool", "command": "ls", "argv_template": ["{path}", "-la"], "sandbox": "workspace", "effect": "execution_started"}
         ]"#;
         registry.load_from_str(json).unwrap();
 
@@ -534,23 +501,28 @@ mod tests {
             registry.get("tool1").unwrap().sandbox_policy(),
             CommandSandboxPolicy::Host
         );
+        assert_eq!(
+            registry.get("tool2").unwrap().sandbox_policy(),
+            CommandSandboxPolicy::Workspace
+        );
     }
 
     #[test]
-    fn test_external_tool_registry_supports_legacy_args_template() {
+    fn test_external_tool_registry_supports_explicit_host_sandbox() {
         let mut registry = ExternalToolRegistry::new();
         let json = r#"[
-            {"name": "legacy", "description": "legacy tool", "command": "echo", "args_template": "hello {name}"}
+            {"name": "host_tool", "description": "host tool", "command": "echo", "argv_template": ["hello", "{name}"], "sandbox": "host"}
         ]"#;
 
         registry.load_from_str(json).unwrap();
 
-        let tool = registry.get("legacy").unwrap();
+        let tool = registry.get("host_tool").unwrap();
         assert_eq!(
             tool.spec().input_schema["required"],
             serde_json::json!(["name"])
         );
         assert_eq!(tool.sandbox_policy(), CommandSandboxPolicy::Host);
+        assert!(tool.spec().description.contains("host execution"));
     }
 
     #[test]
@@ -571,11 +543,22 @@ mod tests {
     fn test_external_tool_registry_rejects_missing_argv_template() {
         let mut registry = ExternalToolRegistry::new();
         let json = r#"[
-            {"name": "broken", "description": "broken tool", "command": "echo"}
+            {"name": "broken", "description": "broken tool", "command": "echo", "sandbox": "host"}
         ]"#;
 
         let err = registry.load_from_str(json).unwrap_err();
-        assert!(err.to_string().contains("missing argv_template"));
+        assert!(err.to_string().contains("missing field `argv_template`"));
+    }
+
+    #[test]
+    fn test_external_tool_registry_rejects_missing_sandbox() {
+        let mut registry = ExternalToolRegistry::new();
+        let json = r#"[
+            {"name": "broken", "description": "broken tool", "command": "echo", "argv_template": ["hello"]}
+        ]"#;
+
+        let err = registry.load_from_str(json).unwrap_err();
+        assert!(err.to_string().contains("missing field `sandbox`"));
     }
 
     #[test]

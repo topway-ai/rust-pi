@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 pub enum TodoStatus {
     #[serde(rename = "pending")]
     Pending,
-    #[serde(alias = "inprogress")]
     #[serde(rename = "in_progress")]
     InProgress,
     #[serde(rename = "done")]
@@ -288,18 +287,6 @@ pub fn parse_classification_response(response: &str) -> bool {
     trimmed == "plan" || (trimmed.len() < 20 && trimmed.contains("plan") && !trimmed.contains("no"))
 }
 
-/// Heuristic-only fallback used when no provider is available (tests, etc.)
-/// and for backward compatibility with `should_use_plan`.
-pub fn should_use_plan(instruction: &str) -> bool {
-    should_require_research_plan_build(instruction)
-}
-
-pub fn should_require_research_plan_build(instruction: &str) -> bool {
-    // When called without an LLM, default to false — direct execution.
-    // The agent's classify_task method will use the LLM for this case.
-    heuristic_fast_path(instruction).unwrap_or_default()
-}
-
 // ── Plan generation via LLM ──
 
 const PLAN_GENERATION_SYSTEM_PROMPT: &str = "\
@@ -430,13 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn test_todo_status_deserializes_inprogress_alias() {
-        let json = r#""inprogress""#;
-        let status: TodoStatus = serde_json::from_str(json).unwrap();
-        assert_eq!(status, TodoStatus::InProgress);
-    }
-
-    #[test]
     fn test_todo_status_deserializes_canonical_in_progress() {
         let json = r#""in_progress""#;
         let status: TodoStatus = serde_json::from_str(json).unwrap();
@@ -461,7 +441,6 @@ mod tests {
 
         let display = plan.format_for_display();
         assert!(!display.contains("in_progress"));
-        assert!(!display.contains("inprogress"));
         assert!(display.contains("[>]"));
         assert!(display.contains("[x]"));
         assert!(display.contains("[ ]"));
@@ -655,61 +634,6 @@ mod tests {
             Some(TaskMode::VerifyOnly)
         );
         assert_eq!(parse_task_mode_response("unknown"), None);
-    }
-
-    // ── should_use_plan backward compatibility (heuristic-only fallback) ──
-
-    #[test]
-    fn test_should_use_plan_explicit_request() {
-        assert!(should_use_plan("make a plan for the refactor"));
-        assert!(should_use_plan("give me steps to implement this"));
-    }
-
-    #[test]
-    fn test_should_use_plan_broad_scope() {
-        assert!(should_use_plan("refactor the entire repo"));
-        assert!(should_use_plan("fix bugs across the codebase"));
-    }
-
-    #[test]
-    fn test_should_skip_plan_trivial() {
-        assert!(!should_use_plan("what is the meaning of life"));
-        assert!(!should_use_plan("show me the files"));
-        assert!(!should_use_plan("read this file"));
-    }
-
-    #[test]
-    fn test_should_skip_plan_short_instructions() {
-        assert!(!should_use_plan("fix the bug in main.rs"));
-        assert!(!should_use_plan("add a new function"));
-        assert!(!should_use_plan("modify this file"));
-        assert!(!should_use_plan("add a docstring to main.rs"));
-    }
-
-    // ── Regression tests for the three exact real Telegram failures ──
-    // These are now ambiguous (None) in the fast path, which means
-    // should_use_plan (heuristic fallback) returns false. The real agent
-    // classification uses the LLM and would also return false for these.
-
-    #[test]
-    fn test_real_failure_1_constrained_single_line_comment() {
-        assert!(!should_use_plan(
-            "Add exactly one short single-line comment to the main CLI entry file explaining what it does. Do not rewrite existing comments, do not convert comments to rustdoc, and do not change anything else. Then tell me exactly which line changed."
-        ));
-    }
-
-    #[test]
-    fn test_real_failure_2_tiny_change_with_verification() {
-        assert!(!should_use_plan(
-            "Make a tiny safe change, then run an appropriate lightweight verification command and tell me both the changed file and the verification result."
-        ));
-    }
-
-    #[test]
-    fn test_real_failure_3_small_multi_step_mutation() {
-        assert!(!should_use_plan(
-            "Add a small new CLI subcommand status that prints the effective workspace, provider, and model. Update the Telegram /start message so it mentions the new status command where appropriate. Then verify the change and summarize the diff."
-        ));
     }
 
     #[test]

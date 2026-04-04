@@ -155,35 +155,6 @@ mod tests {
     }
 
     #[test]
-    fn test_update_plan_accepts_inprogress_alias() {
-        let plan = Arc::new(std::sync::Mutex::new(Plan::new()));
-        let tool = UpdatePlanTool::with_plan(plan.clone());
-
-        let exec = crate::context::ExecutionContext::new(std::path::PathBuf::from("/tmp"));
-        let runtime = crate::runtime::RuntimeOptions::default();
-        let ctx = crate::context::ToolContext::new(&exec, &runtime);
-
-        let args = serde_json::json!({
-            "items": [
-                {"content": "Active task", "status": "inprogress"}
-            ]
-        });
-
-        let result = tool.execute(args, &ctx);
-        assert!(result.is_ok());
-        let output = result.unwrap();
-        assert!(
-            !output.contains("inprogress"),
-            "output should not contain old alias, got: {}",
-            output
-        );
-        assert!(
-            output.contains("[>]"),
-            "inprogress should normalize to in_progress symbol"
-        );
-    }
-
-    #[test]
     fn test_update_plan_canonical_in_progress_used_in_output() {
         let plan = Arc::new(std::sync::Mutex::new(Plan::new()));
         let tool = UpdatePlanTool::with_plan(plan.clone());

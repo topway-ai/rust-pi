@@ -116,10 +116,9 @@ Created automatically as needed. Not removed by `topagent uninstall`.
 
 If a generated tool has an invalid manifest, is missing `script.sh`, is missing its stored script hash, or its current `script.sh` no longer matches the verified hash, TopAgent keeps the artifact on disk but reports it as a workspace warning instead of silently loading it.
 
-TopAgent still reads a legacy workspace-root `commands.json` file for compatibility, but
-`.topagent/external-tools.json` is the canonical location now.
+`.topagent/external-tools.json` is the only supported workspace external-tool config file.
 
-External tool entries can opt into the same workspace sandbox policy used by `bash` and generated tools:
+External tool entries must declare the same centralized sandbox policy explicitly:
 
 ```json
 [
@@ -129,11 +128,18 @@ External tool entries can opt into the same workspace sandbox policy used by `ba
     "command": "rg",
     "argv_template": ["TODO", "{path}"],
     "sandbox": "workspace"
+  },
+  {
+    "name": "system_uptime",
+    "description": "show host uptime",
+    "command": "uptime",
+    "argv_template": [],
+    "sandbox": "host"
   }
 ]
 ```
 
-If `sandbox` is omitted, external tools keep their compatibility default of host execution. Generated tools do not have this toggle; they always use the workspace sandbox policy when `bwrap` is available.
+If `sandbox` is omitted, TopAgent rejects the external-tool config. Generated tools do not have this toggle; they always use the workspace sandbox policy when `bwrap` is available.
 
 ## Persistence and reset
 
@@ -189,7 +195,7 @@ If memory conflicts with the current repo, runtime, config, or service state, th
 - Does **not** remove `MEMORY.md`
 - Does **not** remove topic files, plans, lessons, or tools
 
-This keeps reset semantics simple and compatible with the existing product shape.
+This keeps reset semantics simple and aligned with the current product shape.
 
 ### `/tool_authoring on|off`
 

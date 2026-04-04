@@ -1005,8 +1005,8 @@ mod tests {
 
         genesis
             .create_tool(
-                "legacy_verified",
-                "legacy verified tool",
+                "verified_missing_hash",
+                "verified tool missing hash",
                 "echo ok",
                 vec![],
                 vec![],
@@ -1020,7 +1020,7 @@ mod tests {
 
         let manifest_path = temp
             .path()
-            .join(".topagent/tools/legacy_verified/manifest.json");
+            .join(".topagent/tools/verified_missing_hash/manifest.json");
         let mut manifest: ToolManifest =
             serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
         manifest.script_sha256 = None;
@@ -1035,7 +1035,7 @@ mod tests {
 
         let tools = genesis.list_generated_tools().unwrap();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "legacy_verified");
+        assert_eq!(tools[0].name, "verified_missing_hash");
         assert_eq!(
             tools[0].load_warning.as_deref(),
             Some("missing script_sha256; repair or recreate the tool to make it usable")
@@ -1252,44 +1252,6 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap().output;
         assert!(output.contains("$HOME/foo --bar"));
-    }
-
-    #[test]
-    fn test_legacy_manifest_rejected() {
-        let temp = TempDir::new().unwrap();
-        let genesis = ToolGenesis::new(temp.path().to_path_buf());
-
-        let tool_dir = temp.path().join(".topagent/tools/legacy_tool");
-        std::fs::create_dir_all(&tool_dir).unwrap();
-        std::fs::write(
-            tool_dir.join("manifest.json"),
-            serde_json::to_string_pretty(&serde_json::json!({
-                "name": "legacy_tool",
-                "description": "legacy tool without argv_template",
-                "command": "echo",
-                "args_template": "LEGACY {msg}",
-                "verified": true
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        std::fs::write(tool_dir.join("script.sh"), "echo script").unwrap();
-
-        let loaded = genesis.load_verified_tools().unwrap();
-        assert_eq!(
-            loaded.len(),
-            0,
-            "legacy manifest without argv_template should be rejected"
-        );
-
-        let tools = genesis.list_generated_tools().unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "legacy_tool");
-        assert!(tools[0]
-            .load_warning
-            .as_deref()
-            .unwrap_or_default()
-            .contains("invalid manifest.json"));
     }
 
     #[test]

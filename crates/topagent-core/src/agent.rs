@@ -44,7 +44,6 @@ const MAX_PLANNING_BLOCKS_BEFORE_FAILURE: usize = 5;
 const MAX_PLANNING_PHASE_STEPS: usize = 10;
 const MAX_PLANNING_REDIRECTS: usize = 2;
 const WORKSPACE_EXTERNAL_TOOLS_PATH: &str = ".topagent/external-tools.json";
-const LEGACY_WORKSPACE_COMMANDS_PATH: &str = "commands.json";
 
 /// Number of distinct files changed without a plan before we consider
 /// escalating a non-plan-required task into plan-required.
@@ -1175,16 +1174,9 @@ impl Agent {
             .unwrap_or_else(|| "<unknown>".to_string())
     }
 
-    pub fn load_external_tools_from_file<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
-        let content = std::fs::read_to_string(path).map_err(Error::Io)?;
-        self.external_tools.load_from_str(&content)
-    }
-
     pub fn load_workspace_external_tools(&mut self, workspace_root: &Path) -> Result<()> {
-        for path in Self::workspace_external_tool_paths(workspace_root) {
-            if !path.exists() {
-                continue;
-            }
+        let path = workspace_root.join(WORKSPACE_EXTERNAL_TOOLS_PATH);
+        if path.exists() {
             let content = std::fs::read_to_string(&path).map_err(Error::Io)?;
             self.external_tools.load_from_str(&content)?;
         }
@@ -1359,13 +1351,6 @@ impl Agent {
                 }
             }
         }
-    }
-
-    fn workspace_external_tool_paths(workspace_root: &Path) -> [std::path::PathBuf; 2] {
-        [
-            workspace_root.join(LEGACY_WORKSPACE_COMMANDS_PATH),
-            workspace_root.join(WORKSPACE_EXTERNAL_TOOLS_PATH),
-        ]
     }
 
     fn reload_workspace_tools(&mut self, workspace_root: &Path) -> Result<()> {
@@ -1883,6 +1868,7 @@ path = "src/lib.rs"
                     "description": "mark execution started",
                     "command": "true",
                     "argv_template": [],
+                    "sandbox": "host",
                     "effect": "execution_started"
                 }
             ]),
@@ -1918,6 +1904,7 @@ path = "src/lib.rs"
                     "description": "read-only helper",
                     "command": "true",
                     "argv_template": [],
+                    "sandbox": "host",
                     "effect": "read_only"
                 }
             ]),
